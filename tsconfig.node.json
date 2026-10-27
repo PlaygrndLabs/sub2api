@@ -6,7 +6,9 @@
     ]
   },
   "include": [
-    "test/s3-server.ts"
+    "test/s3-server.ts",
+    "free/test/sqlite.ts",
+    "free/test/account.test.ts"
   ],
   "exclude": []
 }

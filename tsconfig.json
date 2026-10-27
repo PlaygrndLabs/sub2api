@@ -22,11 +22,15 @@
   },
   "include": [
     "src",
+    "free/src",
+    "free/test",
     "test",
     "vitest.config.ts",
     "eslint.config.js"
   ],
   "exclude": [
-    "test/s3-server.ts"
+    "test/s3-server.ts",
+    "free/test/sqlite.ts",
+    "free/test/account.test.ts"
   ]
 }

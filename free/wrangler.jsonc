@@ -1,0 +1,14 @@
+{
+  // sub2api for the Workers Free plan: no container, Claude subscriptions only.
+  // Deploy with: npx wrangler deploy -c free/wrangler.jsonc
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "sub2api-free",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [{ "name": "STORE", "class_name": "Store" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Store"] }]
+}
