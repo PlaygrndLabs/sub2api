@@ -150,6 +150,16 @@ describe("API proxy", () => {
     expect(backend.calls).toEqual(["keyValid", "routing", "token"]);
   });
 
+  it("asks the store for the token again after a minute, so a disabled login stops being used", async () => {
+    const { config, backend } = await setup();
+    await handle(messages({ "x-api-key": KEY }), config);
+    backend.tokenResult = { ok: true, accessToken: "access-2", expiresAt: NOW + 3600 };
+    const later = { ...config, nowSeconds: () => NOW + 61 };
+    await handle(messages({ "x-api-key": KEY }), later);
+    expect(backend.calls.filter((call) => call === "token")).toHaveLength(2);
+    expect(config.cache.token?.value).toBe("access-2");
+  });
+
   it("drops the token and tells the store when Anthropic refuses it", async () => {
     const { config, backend } = await setup(async () => Response.json({ type: "error" }, { status: 401 }));
     const response = await handle(messages({ "x-api-key": KEY }), config);
@@ -324,6 +334,22 @@ describe("dashboard", () => {
     expect((await handle(at("/", { headers: { cookie: await cookie() } }), config)).headers.get("location")).toBe("/management.html");
     const panel = await handle(at("/management.html", { headers: { cookie: await cookie() } }), config);
     expect(await panel.text()).toContain("CPA panel");
+    expect(panel.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+    expect(panel.headers.get("x-frame-options")).toBe("DENY");
+  });
+
+  it("refuses a sign-in body over the limit even without a Content-Length", async () => {
+    const { config } = await setup();
+    const big = new TextEncoder().encode(`password=${PASSWORD}&pad=${"a".repeat(8192)}`);
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(big);
+        controller.close();
+      },
+    });
+    const request = at("/login", { method: "POST", headers: { origin: ORIGIN, "content-type": "application/x-www-form-urlencoded" }, body, duplex: "half" } as RequestInit);
+    expect(request.headers.get("content-length")).toBeNull();
+    expect((await handle(request, config)).status).toBe(401);
   });
 
   it("signs out", async () => {
@@ -364,13 +390,20 @@ describe("management API", () => {
     await handle(await managementCall("/v8/management/config", { authorization: `Bearer ${MANAGEMENT_KEY}` }, { method: "PATCH", body: "{}" }), config);
     expect(config.cache.keys.size).toBe(0);
   });
+
+  it("forgets the cached token after a credential change", async () => {
+    const { config } = await setup();
+    config.cache.token = { value: "old", expiresAt: NOW + 3600, cachedUntil: NOW + 60 };
+    await handle(await managementCall("/v8/management/credentials?name=claude-a.json", { authorization: `Bearer ${MANAGEMENT_KEY}` }, { method: "DELETE" }), config);
+    expect(config.cache.token).toBeNull();
+  });
 });
 
 describe("OAuth callback", () => {
   it("needs sign-in, then hands the code to the store", async () => {
     const { config, backend } = await setup();
     expect((await handle(at("/callback?code=c&state=s"), config)).status).toBe(401);
-    config.cache.token = { value: "old", expiresAt: NOW + 3600 };
+    config.cache.token = { value: "old", expiresAt: NOW + 3600, cachedUntil: NOW + 60 };
     const done = await handle(at("/callback?code=c&state=s", { headers: { cookie: await cookie() } }), config);
     expect(await done.text()).toContain("Login received");
     expect(backend.managed[0]?.url).toBe(`${ORIGIN}/v8/management/oauth/callback?code=c&state=s`);

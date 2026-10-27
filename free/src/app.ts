@@ -4,11 +4,14 @@ import { MANAGEMENT_PREFIX } from "./management.ts";
 import { loginPage, messagePage } from "./pages.ts";
 import { candidates, listedModels, NATIVE_FORMAT, ordered, type Candidate, type Format, type RoutingTable } from "./providers.ts";
 import { downstreamResponse, formatError, presentedKey, providerRequest, routeOf, upstreamRequest, UPSTREAM, type Route } from "./proxy.ts";
-import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, sessionIsValid } from "./session.ts";
+import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "./session.ts";
 
 export const MIN_PASSWORD_LENGTH = 16;
 export const MIN_MANAGEMENT_KEY_LENGTH = MIN_PASSWORD_LENGTH;
 const KEY_CACHE_SECONDS = 60;
+// Short, so a login disabled or removed in the dashboard stops being used within a minute in
+// every isolate, and round-robin across logins still turns.
+const TOKEN_CACHE_SECONDS = 60;
 const MAX_FORM_BODY = 4096;
 // Workers accept request bodies up to 100 MB; a larger declared body is refused before reading.
 const MAX_BODY = 32 * 1024 * 1024;
@@ -18,14 +21,15 @@ const OAUTH_CALLBACK_PATHS = new Set(["/callback", "/auth/callback", "/oauth-cal
 // Per-isolate memory, so most API calls skip the Durable Object round trip entirely.
 export class EdgeCache {
   readonly keys = new Map<string, number>();
-  token: { value: string; expiresAt: number } | null = null;
+  token: { value: string; expiresAt: number; cachedUntil: number } | null = null;
   routing: { table: RoutingTable; until: number } | null = null;
   turn = 0;
 
-  // Config changes reach this isolate at once and others within a minute.
+  // A config or login change reaches this isolate at once and others within a minute.
   forgetConfig(): void {
     this.keys.clear();
     this.routing = null;
+    this.token = null;
   }
 }
 
@@ -85,10 +89,11 @@ async function routingTable(config: AppConfig): Promise<RoutingTable> {
 
 async function accessToken(config: AppConfig): Promise<{ token: string } | Response> {
   const cached = config.cache.token;
-  if (cached !== null && cached.expiresAt - config.nowSeconds() > REFRESH_MARGIN_SECONDS) return { token: cached.value };
+  const now = config.nowSeconds();
+  if (cached !== null && cached.cachedUntil > now && cached.expiresAt - now > REFRESH_MARGIN_SECONDS) return { token: cached.value };
   const result = await config.backend.token();
   if (!result.ok) return apiError(result.status, "api_error", result.message);
-  config.cache.token = { value: result.accessToken, expiresAt: result.expiresAt };
+  config.cache.token = { value: result.accessToken, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS };
   return { token: result.accessToken };
 }
 
@@ -243,14 +248,25 @@ async function login(request: Request, config: AppConfig): Promise<Response> {
   if (config.dashboardPassword.length < MIN_PASSWORD_LENGTH) return html(loginPage(PASSWORD_NOT_SET), 503);
   const client = request.headers.get("cf-connecting-ip") ?? "unknown";
   if (!(await config.backend.attemptAllowed(client))) return html(loginPage("Too many sign-in attempts. Wait a minute and try again."), 429);
-  const length = Number(request.headers.get("content-length") ?? "0");
-  const form = Number.isFinite(length) && length <= MAX_FORM_BODY ? await request.formData().catch(() => null) : null;
+  const form = await readSmallForm(request, MAX_FORM_BODY).catch(() => null);
   const password = form?.get("password");
   if (typeof password !== "string" || !(await passwordMatches(password, config.dashboardPassword))) {
     return html(loginPage("Wrong password."), 401);
   }
   const token = await issueSession(config.dashboardPassword, config.nowSeconds());
   return redirect("/management.html", { "set-cookie": `${SESSION_COOKIE}=${token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${SESSION_SECONDS}` });
+}
+
+// The dashboard is third-party HTML that holds the management key, so it is never framed.
+async function panel(request: Request, config: AppConfig): Promise<Response> {
+  const response = await config.panel(request);
+  const headers = new Headers(response.headers);
+  headers.set("content-security-policy", "frame-ancestors 'none'");
+  headers.set("x-frame-options", "DENY");
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("referrer-policy", "same-origin");
+  headers.set("cache-control", "no-store");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
 function withoutCookies(request: Request, target?: URL): Request {
@@ -274,7 +290,7 @@ async function management(request: Request, url: URL, config: AppConfig): Promis
   // The dashboard checks a server with v0's config read before switching to v8.
   const target = url.pathname === "/v0/management/config" ? new URL(`${MANAGEMENT_PREFIX}/config${url.search}`, url) : url;
   const response = await config.backend.manage(withoutCookies(request, target));
-  // Config, logins and keys all feed the cached routing table.
+  // A write may change providers, remove a key or a login, so this isolate checks again at once.
   if (request.method !== "GET") config.cache.forgetConfig();
   return response;
 }
@@ -319,7 +335,7 @@ export async function handle(request: Request, config: AppConfig): Promise<Respo
       return redirect((await signedIn(request, config)) ? "/management.html" : "/login");
     case "/management.html":
       if (request.method !== "GET") return notFound();
-      return (await signedIn(request, config)) ? config.panel(request) : redirect("/login");
+      return (await signedIn(request, config)) ? panel(request, config) : redirect("/login");
     default:
       return notFound();
   }

@@ -50,3 +50,31 @@ export function readCookie(header: string | null, name: string): string | null {
   }
   return null;
 }
+
+// Reads a small URL-encoded form, giving up past `limit` bytes whatever Content-Length says, so
+// a chunked upload with no length can't make an unauthenticated sign-in buffer a huge body.
+export async function readSmallForm(request: Request, limit: number): Promise<URLSearchParams | null> {
+  const length = Number(request.headers.get("content-length") ?? "0");
+  if (!Number.isFinite(length) || length > limit) return null;
+  if (request.body === null) return new URLSearchParams();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new URLSearchParams(new TextDecoder().decode(bytes));
+}
