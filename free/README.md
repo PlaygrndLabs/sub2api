@@ -32,9 +32,10 @@ export ANTHROPIC_API_KEY=<your gateway API key>
 claude
 ```
 
-## What the spike should confirm
+## Deploying from GitHub
 
-- Connecting the account works: Anthropic's token endpoint accepts the code exchange from a Worker.
-- Claude Code works through the gateway, including long streamed answers.
-- CPU time stays under 10 ms: check **Workers & Pages → sub2api-free → Metrics → CPU time**.
-- The token refresh after about 8 hours works on its own.
+With `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` set as repository secrets (the same ones the main deploy uses), `.github/workflows/deploy-free.yml` deploys this Worker whenever `free/` changes on `main`. Add a gateway API key as the `SUB2API_FREE_TEST_KEY` secret and each deploy also runs Claude Code through the gateway: one short prompt and one long streamed answer.
+
+## Checked live
+
+On 2026-10-27, against a deployed gateway: the Claude login connected from the Worker, `GET /v1/models` answered 200, and Claude Code (`claude -p`) answered both a short prompt and a long streamed one through the gateway.
