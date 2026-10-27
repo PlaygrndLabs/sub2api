@@ -5,12 +5,12 @@
 
 **Literally the [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA) project, deployed as a Cloudflare Worker in one click.** Turn your Claude, ChatGPT Codex and Gemini subscriptions into your own private API. Point Claude Code, the Anthropic or OpenAI SDKs, or any app at your gateway URL and use your subscription from anywhere, with no server or home machine left running.
 
-Two ways to install:
+Two ways to install. Both are free and open source, with the same dashboard; sub2api never charges you anything. Pick by the Cloudflare plan you already have:
 
-| | Plan | What runs | Deploy |
+| Install | Your Cloudflare plan | What runs | Deploy |
 |---|---|---|---|
-| **Full** | Workers Paid ($5/month) | The latest CPA release in a container, with its official dashboard | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api) |
-| **Free** | Workers Free | Our container-free TypeScript gateway with CPA's own dashboard (Claude subscriptions today, more CPA features coming) | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free) |
+| **Container** | Workers Paid (Cloudflare bills $5/month; Containers need it) | The latest CPA release in a container, with its official dashboard | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api) |
+| **Workers-only** | Workers Free | Our container-free TypeScript rewrite of CPA with CPA's own dashboard (Claude subscriptions today, more CPA features coming) | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free) |
 
 ## Why
 
@@ -24,9 +24,9 @@ Two ways to install:
 
 You need a Cloudflare account on the [Workers Paid plan](https://developers.cloudflare.com/workers/platform/pricing/) ($5/month; Containers require it).
 
-On the free plan? Use the **Free** button above instead; see [free/README.md](free/README.md).
+On the free plan? Use the **Workers-only** button above instead; see [free/README.md](free/README.md).
 
-1. Press the **Full** install's **Deploy to Cloudflare** button above.
+1. Press the **Container** install's **Deploy to Cloudflare** button above.
 2. Set the two secrets it asks for. Each needs at least 32 characters of `A-Z a-z 0-9 _ -`; `openssl rand -hex 32` makes one:
    - `DASHBOARD_PASSWORD`: your dashboard sign-in password.
    - `MANAGEMENT_KEY`: CPA's management key, asked for after sign-in.
