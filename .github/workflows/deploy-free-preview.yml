@@ -1,0 +1,56 @@
+# Temporary: deploys the free-plan spike from its PR branch so it can be tried live.
+# Remove before merging.
+name: deploy free preview
+
+on:
+  push:
+    branches: [claude/project-thread-y9ekd4]
+    paths: ["free/**", ".github/workflows/deploy-free-preview.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-free-preview
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx wrangler deploy -c free/wrangler.jsonc
+      # On first deploy only, set a random dashboard password. It is printed only encrypted to
+      # the key of the session that asked for this deploy, never in the clear.
+      - name: Set the dashboard password if missing
+        run: |
+          if npx wrangler secret list -c free/wrangler.jsonc | grep -q DASHBOARD_PASSWORD; then
+            echo "Dashboard password already set."
+            exit 0
+          fi
+          password=$(openssl rand -hex 24)
+          printf '%s' "$password" | npx wrangler secret put DASHBOARD_PASSWORD -c free/wrangler.jsonc
+          cat > recipient.pem <<'KEY'
+          -----BEGIN PUBLIC KEY-----
+          MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAqeOQHZUStfLcQlxueQY7
+          FoVYmnqRc/EQbJVxC6uVrDeEjX7zJqbygNKNiexol5dgSDsYFmiUTRjJFlDcB6p5
+          azRWeZNvXW9eW6OcM6EtGNAFPhWsdZ3ycRIoiUungtkLSlrWkodOqgnq6bxJte68
+          mrQSxEfqhCQhAJOtThjdyLsXJBqbEnmFXiVTEW5RkuYEV5pMN2TqTirV+3NCXKvw
+          sdNlISEDC05FSh2BR+FjsgodJvEeMmFPrD2kq1LymTbgVqi1oeejV+gA2GaaIpwh
+          aTp4RSNnmjWk69/CBXCMO/SbtPIWlAHwxcXlnJ+AfBM1y+s8UCKaKbX8z45Mis1g
+          Np+K24SXXg6Kn0mWY9g0az4oMidzoFKIdz9qhz+Mjap0UCMbaNlr629L+MFisd+d
+          ggt1PM6wjCN0f7JOXBsIX92i5pX+MyeRQo1+/vkJ2coLbchqnsA7v2Z8/rJEkeiC
+          NBrugi3swTl8BNitTXtzI0X2YKjEfGjrddwhjXOzC/atAgMBAAE=
+          -----END PUBLIC KEY-----
+          KEY
+          echo "Encrypted dashboard password:"
+          printf '%s' "$password" | openssl pkeyutl -encrypt -pubin -inkey recipient.pem -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 | base64 -w0
+          echo
