@@ -2,18 +2,20 @@
 
 A container-free version of sub2api that runs on Cloudflare's **free** Workers plan. It is a TypeScript rewrite of CPA (CLIProxyAPI), not CPA itself, and serves **CPA's own dashboard** (Cli-Proxy-API-Management-Center) through a port of CPA's v8 management API. So both installs look and work the same in the browser.
 
-It covers **Claude subscriptions** today; other providers and formats are coming in later phases.
+It covers **Claude subscriptions** and **API keys** for Claude, Gemini, Codex and any OpenAI-compatible provider. More OAuth providers and format translation come in later phases.
 
 - CPA's dashboard, downloaded at build time from the latest panel release (pin one with `PANEL_VERSION`, and its checksum with `PANEL_SHA256`).
 - Claude OAuth login from the dashboard's **OAuth Login** page (the same PKCE flow as CPA and Claude Code), with tokens refreshed automatically.
 - Several Claude logins, used in turn. Upload, download, disable, edit and delete them under **Auth Files**, in CPA's auth-file format, so files move between the two installs.
 - CPA's YAML config, edited in the **Config Panel**. Client API keys live in `access.api-keys`, as in CPA.
 - `POST /v1/messages`, `POST /v1/messages/count_tokens` and `GET /v1/models`, streamed straight through to Anthropic.
+- API-key providers added under **AI Providers** (CPA's `api-keys` config): Claude, Gemini, Codex and OpenAI-compatible endpoints such as OpenRouter. Model aliases, `prefix/model` routing, priorities, key weights and excluded models work as in CPA, and a request moves on to the next key when one is rate limited or failing.
+- Each client talks in its own format: Anthropic (`/v1/messages`), OpenAI Chat (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`) and Gemini (`/v1beta/models/{model}:generateContent`). A request goes to a provider that takes the same format; translating between formats comes later.
 - Everything is stored in one SQLite-backed Durable Object, which the free plan includes.
 
 Request bodies are never parsed, so a Worker spends well under 1 ms of its 10 ms CPU budget even on a 600 KB Claude Code request (see the CPU test in `test/app.test.ts`).
 
-Not included yet: OpenAI/Gemini formats, Codex, Gemini and other accounts, usage statistics and request logs. Deliberately left out: CPA's request cloaking and TLS fingerprint spoofing. Clients other than Claude Code may be refused by Anthropic when they use a subscription token.
+Not included yet: translating between request formats, Codex, Gemini and other OAuth logins, usage statistics and request logs. Deliberately left out: CPA's request cloaking and TLS fingerprint spoofing. Clients other than Claude Code may be refused by Anthropic when they use a subscription token.
 
 ## Try it
 

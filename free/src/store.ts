@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { Account, type Backend, type TokenResult } from "./account.ts";
 import type { Env } from "./env.ts";
 import { handleManagement } from "./management.ts";
+import type { RoutingTable } from "./providers.ts";
 import { Vault } from "./vault.ts";
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -30,5 +31,8 @@ export class Store extends DurableObject<Env> implements Backend {
   }
   manage(request: Request): Promise<Response> {
     return handleManagement(request, this.account);
+  }
+  routing(): Promise<RoutingTable> {
+    return this.account.routing();
   }
 }
