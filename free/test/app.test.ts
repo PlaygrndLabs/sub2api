@@ -185,6 +185,14 @@ describe("dashboard", () => {
     expect(right.headers.get("set-cookie")).toMatch(new RegExp(`^${SESSION_COOKIE}=.+; Path=/; Secure; HttpOnly; SameSite=Strict`));
   });
 
+  it("accepts a sign-in whose Origin is hidden but Sec-Fetch-Site says same-origin", async () => {
+    const { config } = await setup();
+    const hidden = await handle(at("/login", form({ password: PASSWORD }, { origin: "null", "sec-fetch-site": "same-origin" })), config);
+    expect(hidden.status).toBe(303);
+    const crossSite = await handle(at("/login", form({ password: PASSWORD }, { origin: "null", "sec-fetch-site": "cross-site" })), config);
+    expect(crossSite.status).toBe(404);
+  });
+
   it("shows the dashboard to a signed-in visitor", async () => {
     const { config } = await setup();
     const response = await handle(at("/", { headers: { cookie: await cookie() } }), config);

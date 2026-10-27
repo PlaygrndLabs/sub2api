@@ -35,7 +35,7 @@ function html(body: string, status = 200, headers: Record<string, string> = {}):
       "cache-control": "no-store",
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
       "x-frame-options": "DENY",
-      "referrer-policy": "no-referrer",
+      "referrer-policy": "same-origin",
       ...headers,
     },
   });
@@ -97,9 +97,12 @@ async function readForm(request: Request): Promise<FormData | null> {
   return request.formData().catch(() => null);
 }
 
-// Browsers send Origin on every form POST; a missing or foreign one is not our dashboard.
+// Browsers send Origin on every form POST, though some send "null" under a strict referrer
+// policy; Sec-Fetch-Site then still says whether the form came from this site.
 function sameOrigin(request: Request, url: URL): boolean {
-  return request.headers.get("origin") === url.origin;
+  const origin = request.headers.get("origin");
+  if (origin === url.origin) return true;
+  return (origin === null || origin === "null") && request.headers.get("sec-fetch-site") === "same-origin";
 }
 
 async function login(request: Request, config: AppConfig): Promise<Response> {
