@@ -1,7 +1,7 @@
 {
   // sub2api for the Workers Free plan: no container, Claude subscriptions only.
   // Deploy with: npx wrangler deploy -c free/wrangler.jsonc
-  "$schema": "../node_modules/wrangler/config-schema.json",
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "sub2api-free",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",

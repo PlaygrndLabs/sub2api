@@ -6,6 +6,9 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
+  # The container builds the newest CPA release; redeploy weekly so the gateway picks it up.
+  schedule:
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
@@ -16,7 +19,7 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -42,6 +45,10 @@ jobs:
           cache: npm
       - if: steps.creds.outputs.ready == 'true'
         run: npm ci
+      # A scheduled run deploys a CPA release no CI run has seen yet, so check it first.
+      - name: Smoke-test the latest CPA
+        if: steps.creds.outputs.ready == 'true' && github.event_name == 'schedule'
+        run: sh test/container-smoke.sh
       - name: Create the R2 bucket if it is missing
         if: steps.creds.outputs.ready == 'true'
         run: |

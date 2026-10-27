@@ -15,11 +15,15 @@ Not included: OpenAI/Gemini formats, Codex and Gemini accounts, multiple account
 
 You need a Cloudflare account. The free plan is enough.
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free)
+
+It asks for `DASHBOARD_PASSWORD` (at least 16 characters). Or from a clone:
+
 ```bash
-npm ci
+cd free && npm ci
 npx wrangler login
-npx wrangler deploy -c free/wrangler.jsonc
-npx wrangler secret put DASHBOARD_PASSWORD -c free/wrangler.jsonc   # at least 16 characters
+npx wrangler deploy
+npx wrangler secret put DASHBOARD_PASSWORD   # at least 16 characters
 ```
 
 1. Open `https://sub2api-free.<your-subdomain>.workers.dev` and sign in.

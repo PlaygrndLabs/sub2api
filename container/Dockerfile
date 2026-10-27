@@ -1,22 +1,32 @@
 FROM golang:1.26-bookworm AS builder
-ARG CPA_VERSION=v8.0.24
-ARG CPA_COMMIT=091ff27f31285ec4fd1dd5823b44f7f51fb8f48b
+# "latest" builds the newest CPA release tag at build time; set a tag such as v8.0.45 to pin one.
+ARG CPA_VERSION=latest
+ENV GOTOOLCHAIN=auto
 WORKDIR /src
-RUN git init -q . && git remote add origin https://github.com/router-for-me/CLIProxyAPI.git \
-  && git fetch -q --depth 1 origin "${CPA_COMMIT}" && git checkout -q FETCH_HEAD
+RUN set -eu; repo=https://github.com/router-for-me/CLIProxyAPI.git; tag="${CPA_VERSION}"; \
+  if [ "$tag" = latest ]; then \
+    tag=$(git ls-remote --tags --refs "$repo" | awk -F/ '{print $3}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1); \
+  fi; \
+  echo "Building CPA $tag"; \
+  git init -q . && git remote add origin "$repo" \
+  && git fetch -q --depth 1 origin tag "$tag" && git checkout -q "$tag" \
+  && printf '%s' "$tag" > /tmp/cpa-version
 RUN CGO_ENABLED=1 GOOS=linux go build -buildvcs=false \
-  -ldflags="-s -w -X 'main.Version=${CPA_VERSION}' -X 'main.Commit=${CPA_COMMIT}'" \
+  -ldflags="-s -w -X 'main.Version=$(cat /tmp/cpa-version)' -X 'main.Commit=$(git rev-parse HEAD)'" \
   -o /out/CLIProxyAPI ./cmd/server/
 
 FROM debian:bookworm-slim
-ARG PANEL_VERSION=v1.26.1
-ARG PANEL_SHA256=32d835ee74ac9241e3b975567a1d6c24a64627931679dc616721fe5271dfca33
+# The dashboard follows CPA: "latest" takes the newest release. Pin a tag, and optionally its
+# PANEL_SHA256, to freeze it.
+ARG PANEL_VERSION=latest
+ARG PANEL_SHA256=""
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tzdata \
   && rm -rf /var/lib/apt/lists/*
-RUN mkdir -p /panel \
-  && curl -fsSL --retry 5 --retry-all-errors -o /panel/management.html \
-    "https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases/download/${PANEL_VERSION}/management.html" \
-  && echo "${PANEL_SHA256}  /panel/management.html" | sha256sum -c -
+RUN set -eu; base=https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases; \
+  if [ "${PANEL_VERSION}" = latest ]; then url="$base/latest/download/management.html"; \
+  else url="$base/download/${PANEL_VERSION}/management.html"; fi; \
+  mkdir -p /panel && curl -fsSL --retry 5 --retry-all-errors -o /panel/management.html "$url"; \
+  if [ -n "${PANEL_SHA256}" ]; then echo "${PANEL_SHA256}  /panel/management.html" | sha256sum -c -; fi
 WORKDIR /CLIProxyAPI
 COPY --from=builder /out/CLIProxyAPI ./CLIProxyAPI
 COPY entrypoint.sh /entrypoint.sh

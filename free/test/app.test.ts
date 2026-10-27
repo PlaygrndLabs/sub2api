@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { hashKey, type Backend, type Overview, type TokenResult } from "../src/account.ts";
 import { EdgeCache, handle, type AppConfig } from "../src/app.ts";
 import { OAUTH_BETA } from "../src/proxy.ts";
-import { SESSION_COOKIE, issueSession } from "../../src/session.ts";
+import { SESSION_COOKIE, issueSession } from "../src/session.ts";
 
 const PASSWORD = "correct-horse-battery-staple-0123456789";
 const NOW = 1_800_000_000;

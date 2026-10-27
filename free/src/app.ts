@@ -2,7 +2,7 @@ import { hashKey, REFRESH_MARGIN_SECONDS, type Backend } from "./account.ts";
 import type { Fetcher } from "./claude-oauth.ts";
 import { dashboardPage, loginPage, type DashboardView } from "./pages.ts";
 import { downstreamResponse, isProxied, methodAllowed, presentedKey, upstreamRequest } from "./proxy.ts";
-import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, sessionIsValid } from "../../src/session.ts";
+import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, sessionIsValid } from "./session.ts";
 
 export const MIN_PASSWORD_LENGTH = 16;
 const KEY_CACHE_SECONDS = 60;

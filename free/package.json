@@ -1,0 +1,20 @@
+{
+  "name": "sub2api-free",
+  "description": "sub2api for the Cloudflare Workers Free plan: a TypeScript gateway that needs no container.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.149.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "DASHBOARD_PASSWORD": {
+        "description": "Password for the dashboard sign-in. At least 16 characters, for example `openssl rand -hex 24`."
+      }
+    }
+  }
+}
