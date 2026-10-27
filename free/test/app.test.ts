@@ -27,13 +27,18 @@ class FakeBackend implements Backend {
     this.calls.push("token");
     return this.tokenResult;
   }
+  codexResult: TokenResult = { ok: true, accessToken: "chatgpt-1", expiresAt: NOW + 3600, accountId: "acct-1" };
+  async codexToken() {
+    this.calls.push("codexToken");
+    return this.codexResult;
+  }
   async invalidate(accessToken: string) {
     this.invalidated.push(accessToken);
   }
   async attemptAllowed() {
     return true;
   }
-  table: RoutingTable = { credentials: [], claudeOAuth: true };
+  table: RoutingTable = { credentials: [], claudeOAuth: true, codexOAuth: false };
   async routing() {
     this.calls.push("routing");
     return this.table;
@@ -204,7 +209,7 @@ const PROVIDERS = {
 
 async function providersSetup(upstream: (request: Request) => Promise<Response> = async () => new Response("{}")) {
   const fixture = await setup(upstream);
-  fixture.backend.table = { credentials: upstreamCredentials(PROVIDERS), claudeOAuth: true };
+  fixture.backend.table = { credentials: upstreamCredentials(PROVIDERS), claudeOAuth: true, codexOAuth: false };
   return fixture;
 }
 
@@ -470,5 +475,61 @@ describe("CPU budget", () => {
     const gateway = (total - baseline) / runs;
     console.log(`CPU per 600 KB rewritten request: ${gateway.toFixed(2)} ms in the gateway`);
     expect(gateway).toBeLessThan(8);
+  });
+});
+
+describe("ChatGPT (Codex) logins", () => {
+  const sse = (events: unknown[]) => new Response(events.map((event) => `event: x\ndata: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+
+  async function codexSetup(upstream?: (request: Request) => Promise<Response>) {
+    const fixture = await setup(upstream);
+    fixture.backend.table = { credentials: [], claudeOAuth: false, codexOAuth: true };
+    return fixture;
+  }
+
+  it("passes Codex CLI requests through with the login's token and account", async () => {
+    const { config, seen } = await codexSetup();
+    const body = { model: "gpt-5.5-codex", stream: true, store: false, input: [], previous_response_id: "kept-for-codex" };
+    const response = await handle(post("/backend-api/codex/responses", body, { originator: "codex_cli_rs", "session_id": "s-9", "x-codex-turn-state": "t" }), config);
+    expect(response.status).toBe(200);
+    const [sent] = seen;
+    expect(sent?.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+    expect(sent?.headers.get("authorization")).toBe("Bearer chatgpt-1");
+    expect(sent?.headers.get("chatgpt-account-id")).toBe("acct-1");
+    expect(sent?.headers.get("originator")).toBe("codex_cli_rs");
+    expect(sent?.headers.get("session_id")).toBe("s-9");
+    expect(sent?.headers.get("x-codex-turn-state")).toBe("t");
+    expect(await sent?.json()).toEqual(body);
+  });
+
+  it("adapts other Responses clients and answers a non-streaming request from the final event", async () => {
+    const final = { id: "resp_1", object: "response", status: "completed", output: [] };
+    const { config, seen } = await codexSetup(async () => sse([{ type: "response.created" }, { type: "response.completed", response: final }]));
+    const response = await handle(post("/v1/responses", { model: "gpt-5.5", input: "hi", temperature: 0.2, max_output_tokens: 9 }), config);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(final);
+    const [sent] = seen;
+    expect(sent?.headers.get("originator")).toBe("codex-tui");
+    expect(await sent?.json()).toEqual({ model: "gpt-5.5", input: "hi", stream: true, store: false, instructions: "" });
+  });
+
+  it("reports a failed response and refreshes a refused token", async () => {
+    const failing = await codexSetup(async () => sse([{ type: "response.failed", response: { error: { message: "quota" } } }]));
+    const failed = await handle(post("/v1/responses", { model: "gpt-5.5", input: "hi" }), failing.config);
+    expect(failed.status).toBe(502);
+    expect(await failed.json()).toMatchObject({ error: { message: "quota" } });
+
+    const refused = await codexSetup(async () => new Response("no", { status: 401 }));
+    expect((await handle(post("/v1/responses", { model: "gpt-5.5", input: "hi", stream: true }), refused.config)).status).toBe(401);
+    expect(refused.backend.invalidated).toEqual(["chatgpt-1"]);
+    expect(refused.config.cache.codexToken).toBeNull();
+  });
+
+  it("leaves Responses requests alone when no ChatGPT login is on", async () => {
+    const { config, backend, seen } = await codexSetup();
+    backend.table = { ...backend.table, codexOAuth: false };
+    expect((await handle(post("/v1/responses", { model: "gpt-5.5", input: "hi" }), config)).status).toBe(400);
+    expect(seen).toEqual([]);
+    expect(backend.calls).not.toContain("codexToken");
   });
 });

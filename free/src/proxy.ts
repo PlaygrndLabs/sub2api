@@ -2,6 +2,12 @@ import { DEFAULT_BASE_URL, type Format, type UpstreamCredential } from "./provid
 
 export const UPSTREAM = "https://api.anthropic.com";
 export const OAUTH_BETA = "oauth-2025-04-20";
+export const CODEX_UPSTREAM = "https://chatgpt.com/backend-api/codex";
+// What CPA sends for a ChatGPT login when the client doesn't say who it is.
+const CODEX_ORIGINATOR = "codex-tui";
+const CODEX_USER_AGENT = "codex-tui/0.154.0";
+const CODEX_FORWARDED_HEADERS = new Set(["version", "session_id", "session-id", "thread-id", "x-client-request-id", "openai-beta", "originator"]);
+const CODEX_FORWARDED_PREFIXES = ["x-codex-", "x-openai-internal-codex-"];
 
 // The client-facing API endpoints, with the method and request shape each takes. Gemini's
 // /v1beta/models/{model}:{action} is matched separately.
@@ -124,6 +130,23 @@ export function providerRequest(request: Request, url: URL, route: Route, creden
   if (!headers.has("content-type")) headers.set("content-type", "application/json");
   applyConfiguredHeaders(headers, credential, request);
   return new Request(target, { method: "POST", headers, body });
+}
+
+// A Responses request for a ChatGPT (Codex) subscription login. The access token and the
+// ChatGPT account it belongs to replace whatever the client sent.
+export function codexRequest(request: Request, accessToken: string, accountId: string, body: string): Request {
+  const headers = forwardedHeaders(request);
+  for (const [name, value] of request.headers) {
+    if (CODEX_FORWARDED_HEADERS.has(name) || CODEX_FORWARDED_PREFIXES.some((prefix) => name.startsWith(prefix))) headers.set(name, value);
+  }
+  headers.delete("anthropic-version");
+  headers.set("content-type", "application/json");
+  headers.set("accept", "text/event-stream");
+  headers.set("authorization", `Bearer ${accessToken}`);
+  if (accountId !== "") headers.set("chatgpt-account-id", accountId);
+  if (!headers.has("originator")) headers.set("originator", CODEX_ORIGINATOR);
+  if (!headers.has("user-agent")) headers.set("user-agent", CODEX_USER_AGENT);
+  return new Request(`${CODEX_UPSTREAM}/responses`, { method: "POST", headers, body });
 }
 
 export function downstreamResponse(upstream: Response): Response {

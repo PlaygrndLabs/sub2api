@@ -23,6 +23,9 @@ export class Store extends DurableObject<Env> implements Backend {
   token(): Promise<TokenResult> {
     return this.account.token();
   }
+  codexToken(): Promise<TokenResult> {
+    return this.account.codexToken();
+  }
   invalidate(accessToken: string): Promise<void> {
     return this.account.invalidate(accessToken);
   }

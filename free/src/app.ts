@@ -2,8 +2,8 @@ import { hashKey, REFRESH_MARGIN_SECONDS, type Backend } from "./account.ts";
 import type { Fetcher } from "./claude-oauth.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
 import { loginPage, messagePage } from "./pages.ts";
-import { candidates, listedModels, NATIVE_FORMAT, ordered, type Candidate, type Format, type RoutingTable } from "./providers.ts";
-import { downstreamResponse, formatError, presentedKey, providerRequest, routeOf, upstreamRequest, UPSTREAM, type Route } from "./proxy.ts";
+import { candidates, inDefaultFamily, listedModels, NATIVE_FORMAT, ordered, type Candidate, type Format, type RoutingTable } from "./providers.ts";
+import { CODEX_UPSTREAM, codexRequest, downstreamResponse, formatError, presentedKey, providerRequest, routeOf, upstreamRequest, UPSTREAM, type Route } from "./proxy.ts";
 import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "./session.ts";
 
 export const MIN_PASSWORD_LENGTH = 16;
@@ -16,12 +16,13 @@ const MAX_FORM_BODY = 4096;
 // Workers accept request bodies up to 100 MB; a larger declared body is refused before reading.
 const MAX_BODY = 32 * 1024 * 1024;
 const PASSWORD_NOT_SET = `Sign-in is off: set the DASHBOARD_PASSWORD secret to at least ${MIN_PASSWORD_LENGTH} characters.`;
-const OAUTH_CALLBACK_PATHS = new Set(["/callback", "/auth/callback", "/oauth-callback", "/anthropic/callback"]);
+const OAUTH_CALLBACK_PATHS = new Set(["/callback", "/auth/callback", "/oauth-callback", "/anthropic/callback", "/codex/callback"]);
 
 // Per-isolate memory, so most API calls skip the Durable Object round trip entirely.
 export class EdgeCache {
   readonly keys = new Map<string, number>();
   token: { value: string; expiresAt: number; cachedUntil: number } | null = null;
+  codexToken: { value: string; accountId: string; expiresAt: number; cachedUntil: number } | null = null;
   routing: { table: RoutingTable; until: number } | null = null;
   turn = 0;
 
@@ -30,6 +31,7 @@ export class EdgeCache {
     this.keys.clear();
     this.routing = null;
     this.token = null;
+    this.codexToken = null;
   }
 }
 
@@ -110,16 +112,89 @@ async function viaClaudeLogin(request: Request, url: URL, config: AppConfig, bod
   return downstreamResponse(upstream);
 }
 
+async function codexAccess(config: AppConfig): Promise<{ token: string; accountId: string } | Response> {
+  const cached = config.cache.codexToken;
+  const now = config.nowSeconds();
+  if (cached !== null && cached.cachedUntil > now && cached.expiresAt - now > REFRESH_MARGIN_SECONDS) return { token: cached.value, accountId: cached.accountId };
+  const result = await config.backend.codexToken();
+  if (!result.ok) return formatError("openai-response", result.status, "api_error", result.message);
+  const accountId = result.accountId ?? "";
+  config.cache.codexToken = { value: result.accessToken, accountId, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS };
+  return { token: result.accessToken, accountId };
+}
+
+// Fields the ChatGPT Codex endpoint refuses, which other Responses clients may send (as CPA strips).
+const CODEX_DROPPED_FIELDS = new Set(["previous_response_id", "generate", "prompt_cache_retention", "safety_identifier", "stream_options", "max_output_tokens", "max_completion_tokens", "temperature"]);
+
+// The Codex endpoint only streams and never stores. Codex CLI's own requests already fit and go
+// through untouched; other Responses clients' bodies are adjusted, and their non-streaming
+// requests answered from the stream's final event.
+function codexBody(text: string, native: boolean): { body: string; stream: boolean } | null {
+  if (native) return { body: text, stream: true };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const fields = Object.entries(parsed).filter(([key]) => !CODEX_DROPPED_FIELDS.has(key));
+  const body: Record<string, unknown> = { ...Object.fromEntries(fields), stream: true, store: false };
+  body.instructions ??= "";
+  return { body: JSON.stringify(body), stream: (parsed as Record<string, unknown>).stream === true };
+}
+
+const FINAL_EVENTS = new Set(["response.completed", "response.incomplete", "response.failed"]);
+
+// The final response object from a Codex event stream, for a client that didn't ask to stream.
+async function collected(upstream: Response): Promise<Response> {
+  const lines = (await upstream.text()).split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index] ?? "";
+    if (!line.startsWith("data:") || !line.includes('"response.')) continue;
+    let event: { type?: unknown; response?: { error?: { message?: unknown } } };
+    try {
+      event = JSON.parse(line.slice(5)) as typeof event;
+    } catch {
+      continue;
+    }
+    if (typeof event.type !== "string" || !FINAL_EVENTS.has(event.type)) continue;
+    if (event.type === "response.failed") {
+      const message = typeof event.response?.error?.message === "string" ? event.response.error.message : "The response failed upstream.";
+      return formatError("openai-response", 502, "api_error", message);
+    }
+    return Response.json(event.response, { headers: { "cache-control": "no-store" } });
+  }
+  return formatError("openai-response", 502, "api_error", "The upstream stream ended without a final response.");
+}
+
+// A ChatGPT (Codex) subscription login, through the OAuth token the Durable Object keeps fresh.
+async function viaCodexLogin(request: Request, url: URL, config: AppConfig, text: string): Promise<Response> {
+  const native = url.pathname === "/backend-api/codex/responses" || request.headers.has("originator");
+  const prepared = codexBody(text, native);
+  if (prepared === null) return formatError("openai-response", 400, "invalid_request_error", "The request body must be a JSON object.");
+  const access = await codexAccess(config);
+  if (access instanceof Response) return access;
+  const upstream = await config.upstream(codexRequest(request, access.token, access.accountId, prepared.body)).catch(() => null);
+  if (upstream === null) return formatError("openai-response", 502, "api_error", "ChatGPT couldn't be reached.");
+  if (upstream.status === 401) {
+    config.cache.codexToken = null;
+    await config.backend.invalidate(access.token);
+  }
+  if (!upstream.ok || prepared.stream) return downstreamResponse(upstream);
+  return collected(upstream);
+}
+
 // Statuses after which another credential may well succeed.
 const RETRY_STATUSES = new Set([401, 403, 408, 429, 500, 502, 503, 504, 529]);
 const MAX_ATTEMPTS = 3;
 const CLAUDE_LOGIN_ID = "claude-login";
+const CODEX_LOGIN_ID = "codex-login";
 
-function claudeLoginCandidate(model: string): Candidate {
-  return {
-    model,
-    credential: { id: CLAUDE_LOGIN_ID, kind: "claude", group: "oauth", baseUrl: UPSTREAM, apiKey: "", weight: 1, priority: 0, prefix: "", headers: {}, models: [], excluded: [] },
-  };
+function loginCandidate(kind: "claude" | "codex", model: string): Candidate {
+  const id = kind === "claude" ? CLAUDE_LOGIN_ID : CODEX_LOGIN_ID;
+  const baseUrl = kind === "claude" ? UPSTREAM : CODEX_UPSTREAM;
+  return { model, credential: { id, kind, group: "oauth", baseUrl, apiKey: "", weight: 1, priority: 0, prefix: "", headers: {}, models: [], excluded: [] } };
 }
 
 // Most clients put "model" first. Then it is read and replaced in place, without parsing the
@@ -166,7 +241,9 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   if (model === null) return formatError(route.format, 400, "invalid_request_error", "The request needs a model.");
   const found = candidates(table, model);
   const usable = found.filter((candidate) => NATIVE_FORMAT[candidate.credential.kind] === route.format);
-  if (route.format === "claude" && table.claudeOAuth && /^claude-/i.test(model)) usable.push(claudeLoginCandidate(model));
+  if (route.format === "claude" && table.claudeOAuth && /^claude-/i.test(model)) usable.push(loginCandidate("claude", model));
+  // ChatGPT logins take Codex's own models, and any Responses model nothing else serves.
+  if (route.format === "openai-response" && table.codexOAuth && (inDefaultFamily("codex", model) || usable.length === 0)) usable.push(loginCandidate("codex", model));
   if (usable.length === 0) {
     if (route.format === "claude" && table.claudeOAuth) return viaClaudeLogin(request, url, config, text);
     const reason =
@@ -181,8 +258,8 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   for (const [index, candidate] of attempts.entries()) {
     const isLast = index === attempts.length - 1;
     const body = parsed === null || candidate.model === model ? text : parsed.withModel(candidate.model);
-    if (candidate.credential.id === CLAUDE_LOGIN_ID) {
-      const response = await viaClaudeLogin(request, url, config, body);
+    if (candidate.credential.id === CLAUDE_LOGIN_ID || candidate.credential.id === CODEX_LOGIN_ID) {
+      const response = candidate.credential.id === CLAUDE_LOGIN_ID ? await viaClaudeLogin(request, url, config, body) : await viaCodexLogin(request, url, config, body);
       if (isLast || !RETRY_STATUSES.has(response.status)) return response;
       await response.body?.cancel();
       last = new Response(null, { status: response.status });
@@ -304,7 +381,6 @@ async function oauthCallback(request: Request, url: URL, config: AppConfig): Pro
   const response = await config.backend.manage(new Request(target));
   const body = (await response.json().catch(() => null)) as { status?: unknown; error?: unknown } | null;
   if (response.ok && body?.status === "ok") {
-    config.cache.token = null;
     config.cache.forgetConfig();
     return html(messagePage("Login received", "Go back to the dashboard to see the new login.", false));
   }
