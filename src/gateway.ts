@@ -1,6 +1,6 @@
 import type { KeyGuard } from "./key-guard.ts";
 import { classify } from "./routes.ts";
-import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, sessionIsValid } from "../free/src/session.ts";
+import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "../free/src/session.ts";
 import { loginPage, messagePage } from "./login-page.ts";
 
 export type Forward = (request: Request) => Promise<Response>;
@@ -99,7 +99,7 @@ async function login(request: Request, config: GatewayConfig): Promise<Response>
   if (!Number.isFinite(length) || length > MAX_LOGIN_BODY) return html(loginPage("Request too large."), 413);
   const client = request.headers.get("cf-connecting-ip") ?? "unknown";
   if (!(await config.loginLimiter.limit({ key: client })).success) return html(loginPage(TOO_MANY_ATTEMPTS), 429);
-  const form = await request.formData().catch(() => null);
+  const form = await readSmallForm(request, MAX_LOGIN_BODY).catch(() => null);
   const password = form?.get("password");
   if (typeof password !== "string" || !(await passwordMatches(password, config.dashboardPassword))) {
     return html(loginPage("Wrong password."), 401);

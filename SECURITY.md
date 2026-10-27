@@ -14,7 +14,13 @@ Everything a deploy holds belongs to its owner: your Cloudflare account, your R2
 - **The dashboard needs two secrets.** First the `DASHBOARD_PASSWORD` sign-in, which sets an HMAC-signed `__Host-` cookie (HttpOnly, Secure, SameSite=Strict) that lasts 12 hours. Then CPA's own management key. Sign-in attempts are limited to 5 a minute per IP. Changing the password signs out every session.
 - **Only known paths reach CPA.** The API, the dashboard, `/healthz` and the OAuth callback (for a signed-in user only) are forwarded. Everything else, and any path with encoded separators, returns 404. Browser cookies are stripped before forwarding.
 - **State stays in your R2 bucket.** CPA's S3 client talks to `http://r2.internal`, which only the container can reach and which the Worker serves from an R2 binding. No R2 API tokens exist.
-- **A pinned supply chain.** CPA is built from a pinned commit, and the dashboard HTML is checksum-verified (`container/Dockerfile`).
+- **An upstream you trust.** By default the container builds the newest CPA release tag, and both installs download the newest dashboard release, so a new upstream release reaches your gateway on its next deploy, including the weekly one. The dashboard runs on your gateway's origin and holds your management key, so a compromised upstream release would control your gateway. To freeze them, set `CPA_VERSION`, `PANEL_VERSION` and `PANEL_SHA256` in `container/Dockerfile` (container install), or the `PANEL_VERSION` and `PANEL_SHA256` repository variables (Workers-only install, `.github/workflows/deploy-free.yml`). The build fails when the dashboard doesn't match its checksum. Each build prints the CPA tag and the dashboard's SHA-256.
+
+### The Workers-only install (`free/`)
+
+- **API calls need a key from `access.api-keys`.** The key check and the Claude token are cached per Worker isolate for at most a minute, so a key or login you remove stops working everywhere within a minute.
+- **The dashboard and management API need two secrets,** as above: the `DASHBOARD_PASSWORD` sign-in cookie and the management key (`MANAGEMENT_KEY`, or the password when it isn't set). Use a separate `MANAGEMENT_KEY`: the dashboard can remember the key it is given in browser storage. Sign-in attempts are limited to 5 a minute per IP, and the dashboard page is never framed.
+- **Only Anthropic is called.** The three proxied paths go to `api.anthropic.com` with an allowlist of request headers; the client's key and cookies are never forwarded. OAuth uses PKCE (S256), and refresh tokens stay in the Durable Object's storage.
 
 ## Your part
 
