@@ -377,10 +377,17 @@ describe("management API", () => {
     expect(backend.managed[0]?.headers.get("cookie")).toBeNull();
   });
 
-  it("is off until a long enough management key is set", async () => {
-    const { config } = await setup();
-    const off = { ...config, managementKey: "short" };
-    expect((await handle(await managementCall("/v8/management/config", { authorization: "Bearer short" }), off)).status).toBe(404);
+  it("is off until its own long enough key is set, never the sign-in password", async () => {
+    const { config, backend } = await setup();
+    for (const managementKey of ["", "short", PASSWORD]) {
+      const off = { ...config, managementKey };
+      const response = await handle(await managementCall("/v8/management/config", { authorization: `Bearer ${managementKey}` }), off);
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: expect.stringMatching(/MANAGEMENT_KEY .*different from DASHBOARD_PASSWORD/) });
+    }
+    // Signed-out callers learn nothing about the setup.
+    expect((await handle(at("/v8/management/config"), { ...config, managementKey: "" })).status).toBe(401);
+    expect(backend.managed).toHaveLength(0);
   });
 
   it("answers the dashboard's v0 probe with the v8 config", async () => {

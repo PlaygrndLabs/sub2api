@@ -26,18 +26,18 @@ You need a Cloudflare account. The free plan is enough.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free)
 
-It asks for `DASHBOARD_PASSWORD` (at least 16 characters) and optionally `MANAGEMENT_KEY`. Or from a clone:
+It asks for `DASHBOARD_PASSWORD` and `MANAGEMENT_KEY`, each at least 16 characters and different from each other, as on the Container install. Or from a clone:
 
 ```bash
 cd free && npm ci
 npx wrangler login
 npx wrangler deploy
 npx wrangler secret put DASHBOARD_PASSWORD   # at least 16 characters
-npx wrangler secret put MANAGEMENT_KEY       # optional; defaults to the dashboard password
+npx wrangler secret put MANAGEMENT_KEY       # at least 16 characters, not the dashboard password
 ```
 
 1. Open `https://sub2api-free.<your-subdomain>.workers.dev` and sign in with the dashboard password.
-2. CPA's dashboard opens and asks for the management key: enter `MANAGEMENT_KEY`, or the dashboard password if you didn't set one.
+2. CPA's dashboard opens and asks for the management key: enter `MANAGEMENT_KEY`.
 3. Under **OAuth Login**, press **+** on Claude, approve on Claude's page, then paste the `localhost` address you land on into **Callback URL**.
 4. Under **Config Panel**, add an API key and save, then point Claude Code at the gateway:
 
@@ -61,7 +61,7 @@ env_key = "SUB2API_KEY"
 
 Keys and the login made with the first free release keep working: the old login is turned into an auth file on first use.
 
-The management API sits behind both the sign-in cookie and the management key. It is off when neither secret is at least 16 characters.
+The management API sits behind both the sign-in cookie and the management key. It stays off until `MANAGEMENT_KEY` is set to at least 16 characters and differs from the dashboard password, because the dashboard keeps the key in browser storage.
 
 ## Deploying from GitHub
 

@@ -431,17 +431,25 @@ function withoutCookies(request: Request, target?: URL): Request {
   return new Request(target ?? request.url, new Request(request, { headers }));
 }
 
+// As on the container install, the management key is its own secret: the dashboard keeps it in
+// browser storage, so it must never be the sign-in password.
+const MANAGEMENT_KEY_NOT_SET = `The management API is off: set the MANAGEMENT_KEY secret to at least ${MIN_MANAGEMENT_KEY_LENGTH} characters, different from DASHBOARD_PASSWORD.`;
+
+function managementEnabled(config: AppConfig): boolean {
+  return config.managementKey.length >= MIN_MANAGEMENT_KEY_LENGTH && config.managementKey !== config.dashboardPassword;
+}
+
 // The dashboard sends CPA's management key with every call, on top of the sign-in cookie.
 async function managementKeyValid(request: Request, config: AppConfig): Promise<boolean> {
-  if (config.managementKey.length < MIN_MANAGEMENT_KEY_LENGTH) return false;
+  if (!managementEnabled(config)) return false;
   const bearer = request.headers.get("authorization")?.replace(/^bearer\s+/i, "").trim();
   const given = bearer || request.headers.get("x-management-key")?.trim() || "";
   return given !== "" && passwordMatches(given, config.managementKey);
 }
 
 async function management(request: Request, url: URL, config: AppConfig): Promise<Response> {
-  if (config.managementKey.length < MIN_MANAGEMENT_KEY_LENGTH) return notFound();
   if (!(await signedIn(request, config))) return Response.json({ error: "sign in at /login first" }, { status: 401 });
+  if (!managementEnabled(config)) return Response.json({ error: MANAGEMENT_KEY_NOT_SET }, { status: 503 });
   if (!(await managementKeyValid(request, config))) return Response.json({ error: "invalid management key" }, { status: 401 });
   // The dashboard checks a server with v0's config read before switching to v8.
   const target = url.pathname === "/v0/management/config" ? new URL(`${MANAGEMENT_PREFIX}/config${url.search}`, url) : url;
