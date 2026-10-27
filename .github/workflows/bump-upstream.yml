@@ -1,0 +1,75 @@
+# Weekly: checks for a new CPA release or dashboard release and, when there is one, smoke-tests it
+# and opens a PR that bumps the pins. Nothing deploys until a person merges that PR. Needs
+# "Allow GitHub Actions to create and approve pull requests" in Settings > Actions > General.
+name: bump upstream
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: bump-upstream
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Look up the latest releases
+        id: bump
+        run: sh scripts/bump-upstream.sh | tee -a "$GITHUB_OUTPUT"
+      - name: Check for changes
+        id: changed
+        run: |
+          if git diff --quiet; then
+            echo "::notice::CPA and the dashboard are already at their latest releases."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      # A PR opened with the workflow's own token doesn't start the ci workflow, so the new CPA
+      # build is checked here before the PR exists.
+      - if: steps.changed.outputs.changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - if: steps.changed.outputs.changed == 'true'
+        run: npm ci
+      - name: Smoke-test the new CPA
+        if: steps.changed.outputs.changed == 'true'
+        run: sh test/container-smoke.sh
+      - name: Open the bump PR
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CPA_TAG: ${{ steps.bump.outputs.CPA_TAG }}
+          CPA_SHA: ${{ steps.bump.outputs.CPA_SHA }}
+          PANEL_TAG: ${{ steps.bump.outputs.PANEL_TAG }}
+          PANEL_HASH: ${{ steps.bump.outputs.PANEL_HASH }}
+        run: |
+          branch="upstream-bump/cpa-$CPA_TAG-panel-$PANEL_TAG"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "::notice::$branch already exists; its PR is waiting for review."
+            exit 0
+          fi
+          git config user.name "PlaygrndLabs"
+          git config user.email "ma.karimi76@gmail.com"
+          git switch -c "$branch"
+          git commit -qam "Bump CPA to $CPA_TAG and its dashboard to $PANEL_TAG"
+          git push -q origin "$branch"
+          cat > body.md <<EOF
+          Pins the container install to CPA [$CPA_TAG](https://github.com/router-for-me/CLIProxyAPI/releases/tag/$CPA_TAG) (commit \`$CPA_SHA\`) and both installs to dashboard [$PANEL_TAG](https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases/tag/$PANEL_TAG) (SHA-256 \`$PANEL_HASH\`).
+
+          The container smoke test passed on this exact build. Merging deploys both installs.
+
+          Before merging, read the upstream release notes and changes since the last pin: the dashboard runs on your gateway's origin with the management key, and CPA holds every login.
+          EOF
+          gh pr create --base main --head "$branch" --title "Bump CPA to $CPA_TAG and its dashboard to $PANEL_TAG" --body-file body.md

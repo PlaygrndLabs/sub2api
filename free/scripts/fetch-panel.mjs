@@ -1,12 +1,16 @@
 // Downloads CPA's official dashboard (Cli-Proxy-API-Management-Center) into public/ before each
-// build. PANEL_VERSION pins a release tag; the default is the latest release, as on the paid install.
-// PANEL_SHA256, when set, must match the download, so a changed upstream file fails the build.
+// build. The release and its SHA-256 are pinned below, as in container/Dockerfile, and bumped by a
+// reviewed PR from .github/workflows/bump-upstream.yml; a changed upstream file fails the build.
+// PANEL_VERSION (a tag, or "latest") and PANEL_SHA256 override them.
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 
-const version = process.env.PANEL_VERSION || "latest";
-const expected = (process.env.PANEL_SHA256 ?? "").trim().toLowerCase();
+const PINNED_VERSION = "v1.26.7";
+const PINNED_SHA256 = "8c9c6b7d3fb311e6aad5d06e1993e53a2d28389e640448a1bc6304ed20b057b5";
+
+const version = process.env.PANEL_VERSION || PINNED_VERSION;
+const expected = (process.env.PANEL_SHA256 || (version === PINNED_VERSION ? PINNED_SHA256 : "")).trim().toLowerCase();
 const base = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases";
 const url = version === "latest" ? `${base}/latest/download/management.html` : `${base}/download/${version}/management.html`;
 

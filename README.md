@@ -9,13 +9,13 @@ Two ways to install. Both are free and open source, with the same dashboard; sub
 
 | Install | Your Cloudflare plan | What runs | Deploy |
 |---|---|---|---|
-| **Container** | Workers Paid (Cloudflare bills $5/month; Containers need it) | The latest CPA release in a container, with its official dashboard | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api) |
+| **Container** | Workers Paid (Cloudflare bills $5/month; Containers need it) | A pinned CPA release in a container, bumped by a weekly PR you review, with its official dashboard | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api) |
 | **Workers-only** | Workers Free | Our container-free TypeScript rewrite of CPA with CPA's own dashboard (Claude subscriptions today, more CPA features coming) | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free) |
 
 ## Why
 
 - **One click, no server.** Cloudflare builds and runs everything. Nothing to keep online.
-- **The real CPA.** Built from the latest upstream release with its official dashboard, rebuilt weekly, so every provider and API CPA supports just works: Anthropic Messages, OpenAI-compatible and Gemini.
+- **The real CPA.** Built from a pinned upstream release with its official dashboard. A weekly job opens a PR for each new release, so you review an upgrade before it deploys. Every provider and API CPA supports just works: Anthropic Messages, OpenAI-compatible and Gemini.
 - **Private by default.** The dashboard sits behind a password, and every API call needs a key you create. Until then, all calls are refused.
 - **Logins that stick.** Config and OAuth logins live in your own R2 bucket and survive restarts and redeploys.
 - **Costs little when idle.** The container sleeps after 30 minutes and wakes on the next request.
@@ -112,7 +112,7 @@ npm run verify              # typecheck, lint, unit tests
 sh test/container-smoke.sh  # needs Docker: runs CPA against the R2 shim
 ```
 
-The container builds the newest CPA release and dashboard by default. To freeze them, set `CPA_VERSION`, `PANEL_VERSION` and `PANEL_SHA256` in `container/Dockerfile`.
+CPA and the dashboard are pinned in `container/Dockerfile` (and the dashboard in `free/scripts/fetch-panel.mjs`). `sh scripts/bump-upstream.sh` moves both to the latest upstream releases; the weekly `bump upstream` workflow runs it and opens a PR. It needs **Allow GitHub Actions to create and approve pull requests** under Settings > Actions > General.
 </details>
 
 ## Good to know
