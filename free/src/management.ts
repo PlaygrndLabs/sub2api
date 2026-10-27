@@ -1,4 +1,4 @@
-import type { Account } from "./account.ts";
+import { LOGIN_PROVIDERS, type Account, type LoginProvider } from "./account.ts";
 import { Config, ConfigError, configTag, ifMatchSatisfied } from "./config.ts";
 import type { CredentialFile } from "./vault.ts";
 
@@ -9,7 +9,8 @@ import type { CredentialFile } from "./vault.ts";
 export const MANAGEMENT_PREFIX = "/v8/management";
 export const GATEWAY_VERSION = "sub2api-free";
 const ANTHROPIC_MODELS = "https://api.anthropic.com/v1/models";
-const OAUTH_PROVIDERS = new Set(["claude"]);
+// CPA's provider names and their aliases.
+const OAUTH_ALIASES: Record<string, LoginProvider> = { claude: "claude", anthropic: "claude", codex: "codex", openai: "codex" };
 
 function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } });
@@ -244,9 +245,9 @@ async function oauthRoute(request: Request, url: URL, action: string, account: A
         provider ||= bodyProvider;
       }
       if (provider === "") return failure(400, "provider is required");
-      if (provider === "anthropic") provider = "claude";
-      if (!OAUTH_PROVIDERS.has(provider)) return failure(404, "provider_not_found");
-      const { url: authUrl, state } = await account.startLogin(provider);
+      const login = Object.hasOwn(OAUTH_ALIASES, provider) ? OAUTH_ALIASES[provider] : undefined;
+      if (login === undefined) return failure(404, "provider_not_found");
+      const { url: authUrl, state } = await account.startLogin(login);
       return json({ status: "ok", url: authUrl, state });
     }
     case "GET status": {
@@ -332,7 +333,7 @@ export async function handleManagement(request: Request, account: Account): Prom
       }
       case "POST credentials/refresh": {
         const refreshed: string[] = [];
-        for (const file of account.claudeFiles()) if ((await account.tokenFor(file, true)).ok) refreshed.push(file.name);
+        for (const file of LOGIN_PROVIDERS.flatMap((provider) => account.loginFiles(provider))) if ((await account.tokenFor(file, true)).ok) refreshed.push(file.name);
         return json({ status: "ok", refreshed: refreshed.length, files: refreshed });
       }
       case "GET observability/logs":

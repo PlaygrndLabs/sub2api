@@ -56,6 +56,8 @@ export interface RoutingTable {
   readonly credentials: readonly UpstreamCredential[];
   // Whether at least one Claude OAuth login is enabled.
   readonly claudeOAuth: boolean;
+  // Whether at least one ChatGPT (Codex) OAuth login is enabled.
+  readonly codexOAuth: boolean;
 }
 
 export interface Candidate {
@@ -151,6 +153,11 @@ export function excluded(model: string, patterns: readonly string[]): boolean {
     const [head = "", tail = ""] = pattern.split("*");
     return name.startsWith(head) && name.endsWith(tail) && name.length >= head.length + tail.length;
   });
+}
+
+// Whether a provider kind serves this model by default, without a model list.
+export function inDefaultFamily(kind: ProviderKind, model: string): boolean {
+  return DEFAULT_FAMILY[kind]?.test(model) ?? false;
 }
 
 // The upstream model a credential would use for a requested model, or null if it can't serve it.

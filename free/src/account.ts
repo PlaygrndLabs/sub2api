@@ -1,15 +1,22 @@
-import { OAuthError, authorizeUrl, exchangeCode, parseCallback, randomToken, refresh, type Credential, type Fetcher } from "./claude-oauth.ts";
+import { OAuthError, authorizeUrl, exchangeCode, parseCallback, randomToken, refresh, type Fetcher } from "./claude-oauth.ts";
+import * as codex from "./codex-oauth.ts";
 import { Config } from "./config.ts";
 import { upstreamCredentials, type RoutingTable, type UpstreamCredential } from "./providers.ts";
 import { claudeCredential, claudeFileData, type CredentialFile, type LoginSession, type Vault } from "./vault.ts";
 
-export type TokenResult = { ok: true; accessToken: string; expiresAt: number } | { ok: false; status: number; message: string };
+export type TokenResult = { ok: true; accessToken: string; expiresAt: number; accountId?: string } | { ok: false; status: number; message: string };
+
+// The subscription logins the gateway signs in to and keeps fresh.
+export type LoginProvider = "claude" | "codex";
+export const LOGIN_PROVIDERS: readonly LoginProvider[] = ["claude", "codex"];
+const LABEL: Record<LoginProvider, string> = { claude: "Claude", codex: "ChatGPT (Codex)" };
 
 // Everything the Worker asks of the Durable Object. The Durable Object is one instance, so the
 // state below (config, token refreshes, login sessions) is never raced by another copy.
 export interface Backend {
   keyValid(hash: string): Promise<boolean>;
   token(): Promise<TokenResult>;
+  codexToken(): Promise<TokenResult>;
   invalidate(accessToken: string): Promise<void>;
   attemptAllowed(client: string): Promise<boolean>;
   manage(request: Request): Promise<Response>;
@@ -18,7 +25,19 @@ export interface Backend {
 
 export const REFRESH_MARGIN_SECONDS = 5 * 60;
 const FORCED_REFRESH_GAP_SECONDS = 60;
-const NOT_CONNECTED = "No Claude account is connected yet: add one under OAuth login in the dashboard.";
+
+interface Login {
+  readonly accessToken: string;
+  readonly refreshToken: string;
+  readonly expiresAt: number;
+  readonly accountId: string;
+}
+
+function loginOf(file: CredentialFile): Login | null {
+  if (file.provider === "codex") return codex.codexCredential(file.data);
+  const credential = claudeCredential(file.data);
+  return credential === null ? null : { ...credential, accountId: "" };
+}
 
 export async function hashKey(key: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`sub2api key v1\0${key}`));
@@ -31,7 +50,7 @@ export class Account {
   private keyHashes: Set<string> | null = null;
   private readonly refreshing = new Map<string, Promise<TokenResult>>();
   private readonly lastForcedRefresh = new Map<string, number>();
-  private next = 0;
+  private readonly next = new Map<LoginProvider, number>();
 
   constructor(
     readonly vault: Vault,
@@ -55,7 +74,7 @@ export class Account {
   // and whether any Claude login is on.
   async routing(): Promise<RoutingTable> {
     this.upstreams ??= upstreamCredentials(this.currentConfig().read([]));
-    return { credentials: this.upstreams, claudeOAuth: this.claudeFiles().length > 0 };
+    return { credentials: this.upstreams, claudeOAuth: this.loginFiles("claude").length > 0, codexOAuth: this.loginFiles("codex").length > 0 };
   }
 
   async keyValid(hash: string): Promise<boolean> {
@@ -66,22 +85,34 @@ export class Account {
     return this.keyHashes.has(hash) || this.vault.keyExists(hash);
   }
 
-  claudeFiles(): CredentialFile[] {
-    return this.vault.credentialFiles().filter((file) => file.provider === "claude" && !file.disabled);
+  loginFiles(provider: LoginProvider): CredentialFile[] {
+    return this.vault.credentialFiles().filter((file) => file.provider === provider && !file.disabled);
   }
 
-  // Picks the next enabled Claude login in turn (round-robin), refreshing it when near expiry.
-  async token(): Promise<TokenResult> {
-    const files = this.claudeFiles();
-    if (files.length === 0) return { ok: false, status: 503, message: NOT_CONNECTED };
-    const file = files[this.next % files.length] as CredentialFile;
-    this.next += 1;
-    return this.tokenFor(file);
+  claudeFiles(): CredentialFile[] {
+    return this.loginFiles("claude");
+  }
+
+  token(): Promise<TokenResult> {
+    return this.loginToken("claude");
+  }
+
+  codexToken(): Promise<TokenResult> {
+    return this.loginToken("codex");
+  }
+
+  // Picks the provider's next enabled login in turn (round-robin), refreshing it when near expiry.
+  async loginToken(provider: LoginProvider): Promise<TokenResult> {
+    const files = this.loginFiles(provider);
+    if (files.length === 0) return { ok: false, status: 503, message: `No ${LABEL[provider]} account is connected yet: add one under OAuth login in the dashboard.` };
+    const turn = this.next.get(provider) ?? 0;
+    this.next.set(provider, turn + 1);
+    return this.tokenFor(files[turn % files.length] as CredentialFile);
   }
 
   async tokenFor(file: CredentialFile, force = false): Promise<TokenResult> {
-    const current = claudeCredential(file.data);
-    if (current === null) return { ok: false, status: 503, message: `The Claude login ${file.name} has no tokens: sign in again.` };
+    const current = loginOf(file);
+    if (current === null) return { ok: false, status: 503, message: `The login ${file.name} has no tokens: sign in again.` };
     if (!force && current.expiresAt - this.nowSeconds() > REFRESH_MARGIN_SECONDS) return granted(current);
     let pending = this.refreshing.get(file.name);
     if (pending === undefined) {
@@ -91,11 +122,11 @@ export class Account {
     return pending;
   }
 
-  // Anthropic refused this token: refresh before its stated expiry, at most once a minute per
+  // The provider refused this token: refresh before its stated expiry, at most once a minute per
   // login so a client that keeps getting refused can't hammer the token endpoint.
   async invalidate(accessToken: string): Promise<void> {
     const now = this.nowSeconds();
-    for (const file of this.claudeFiles()) {
+    for (const file of LOGIN_PROVIDERS.flatMap((provider) => this.loginFiles(provider))) {
       if (file.data.access_token !== accessToken) continue;
       if (now - (this.lastForcedRefresh.get(file.name) ?? Number.NEGATIVE_INFINITY) < FORCED_REFRESH_GAP_SECONDS) return;
       this.lastForcedRefresh.set(file.name, now);
@@ -108,11 +139,11 @@ export class Account {
     return this.vault.attemptAllowed(client, this.nowSeconds());
   }
 
-  async startLogin(provider: string): Promise<{ url: string; state: string }> {
+  async startLogin(provider: LoginProvider): Promise<{ url: string; state: string }> {
     const state = randomToken(32);
     const verifier = randomToken(96);
     this.vault.saveSession({ state, provider, verifier, createdAt: this.nowSeconds(), status: "wait", error: "" }, this.nowSeconds());
-    return { url: await authorizeUrl(state, verifier), state };
+    return { url: provider === "codex" ? await codex.authorizeUrl(state, verifier) : await authorizeUrl(state, verifier), state };
   }
 
   session(state: string): LoginSession | null {
@@ -131,8 +162,14 @@ export class Account {
       return { status: 200 };
     }
     try {
-      const credential = await exchangeCode(this.fetcher, code.split("#")[0] ?? code, state, session.verifier, this.nowSeconds());
-      this.vault.saveCredentialFile(`claude-${credential.email || randomToken(6)}.json`, "claude", claudeFileData(credential), this.nowSeconds());
+      const bareCode = code.split("#")[0] ?? code;
+      if (session.provider === "codex") {
+        const credential = await codex.exchangeCode(this.fetcher, bareCode, session.verifier, this.nowSeconds());
+        this.vault.saveCredentialFile(await codex.codexFileName(credential), "codex", codex.codexFileData(credential), this.nowSeconds());
+      } else {
+        const credential = await exchangeCode(this.fetcher, bareCode, state, session.verifier, this.nowSeconds());
+        this.vault.saveCredentialFile(`claude-${credential.email || randomToken(6)}.json`, "claude", claudeFileData(credential), this.nowSeconds());
+      }
       finish("ok");
     } catch (failure) {
       finish("error", failure instanceof OAuthError ? `Failed to exchange authorization code for tokens: ${failure.message}` : "Failed to exchange authorization code for tokens");
@@ -150,25 +187,35 @@ export class Account {
     return session?.status === "ok" ? null : session?.error || "Login failed.";
   }
 
-  private async refresh(file: CredentialFile, current: Credential): Promise<TokenResult> {
+  private async refresh(file: CredentialFile, current: Login): Promise<TokenResult> {
+    const label = file.provider === "codex" ? LABEL.codex : LABEL.claude;
     try {
-      const next = await refresh(this.fetcher, current, this.nowSeconds());
-      this.vault.saveCredentialFile(file.name, "claude", { ...file.data, ...claudeFileData(next) }, this.nowSeconds());
+      let next: Login;
+      if (file.provider === "codex") {
+        const refreshed = await codex.refresh(this.fetcher, codex.codexCredential(file.data) as codex.CodexCredential, this.nowSeconds());
+        this.vault.saveCredentialFile(file.name, file.provider, { ...file.data, ...codex.codexFileData(refreshed) }, this.nowSeconds());
+        next = refreshed;
+      } else {
+        const refreshed = await refresh(this.fetcher, claudeCredential(file.data) as NonNullable<ReturnType<typeof claudeCredential>>, this.nowSeconds());
+        this.vault.saveCredentialFile(file.name, file.provider, { ...file.data, ...claudeFileData(refreshed) }, this.nowSeconds());
+        next = { ...refreshed, accountId: "" };
+      }
       this.vault.setCredentialStatus(file.name, false, "", this.nowSeconds());
       return granted(next);
     } catch (error) {
       if (error instanceof OAuthError && (error.status === 400 || error.status === 401)) {
         this.vault.setCredentialStatus(file.name, false, "token expired", this.nowSeconds());
-        return { ok: false, status: 503, message: "The Claude login has expired: sign in again under OAuth login in the dashboard." };
+        return { ok: false, status: 503, message: `The ${label} login has expired: sign in again under OAuth login in the dashboard.` };
       }
       // A token that hasn't actually expired yet is still worth using.
       if (current.expiresAt > this.nowSeconds()) return granted(current);
-      const reason = error instanceof OAuthError ? error.message : "Anthropic couldn't be reached";
-      return { ok: false, status: 503, message: `Couldn't refresh the Claude login. ${reason}` };
+      const reason = error instanceof OAuthError ? error.message : "the provider couldn't be reached";
+      return { ok: false, status: 503, message: `Couldn't refresh the ${label} login. ${reason}` };
     }
   }
 }
 
-function granted(credential: Credential): TokenResult {
-  return { ok: true, accessToken: credential.accessToken, expiresAt: credential.expiresAt };
+function granted(login: Login): TokenResult {
+  const result = { ok: true as const, accessToken: login.accessToken, expiresAt: login.expiresAt };
+  return login.accountId === "" ? result : { ...result, accountId: login.accountId };
 }
