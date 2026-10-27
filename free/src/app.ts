@@ -1,5 +1,6 @@
 import { hashKey, REFRESH_MARGIN_SECONDS, type Backend } from "./account.ts";
 import type { Fetcher } from "./claude-oauth.ts";
+import { claudeEventStream, claudeMessage, ClaudeStream, claudeToResponses } from "./claude-responses.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
 import { loginPage, messagePage } from "./pages.ts";
 import { candidates, inDefaultFamily, listedModels, NATIVE_FORMAT, ordered, type Candidate, type Format, type RoutingTable } from "./providers.ts";
@@ -185,6 +186,67 @@ async function viaCodexLogin(request: Request, url: URL, config: AppConfig, text
   return collected(upstream);
 }
 
+// Formats a provider takes with translation; for now Claude clients can reach Responses upstreams.
+function servable(format: Format, kind: Candidate["credential"]["kind"]): boolean {
+  return NATIVE_FORMAT[kind] === format || (format === "claude" && NATIVE_FORMAT[kind] === "openai-response");
+}
+
+function parsedObject(text: string): Record<string, unknown> | null {
+  try {
+    const value: unknown = JSON.parse(text);
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+// The message an upstream error carries, whichever shape it came in.
+async function upstreamMessage(upstream: Response): Promise<string> {
+  const body = parsedObject(await upstream.text().catch(() => ""));
+  const error = body?.error;
+  if (typeof error === "object" && error !== null && typeof (error as { message?: unknown }).message === "string") return (error as { message: string }).message;
+  if (typeof body?.detail === "string") return body.detail;
+  return `The upstream answered ${upstream.status}.`;
+}
+
+// A Claude request served by a Responses upstream (a ChatGPT login or a Codex key): the body is
+// translated, and the answer translated back, streamed or whole.
+async function viaResponses(request: Request, url: URL, route: Route, config: AppConfig, candidate: Candidate, text: string): Promise<Response> {
+  const claude = parsedObject(text);
+  if (claude === null) return formatError("claude", 400, "invalid_request_error", "The request body must be a JSON object.");
+  if (url.pathname.endsWith("/count_tokens")) return Response.json({ input_tokens: Math.ceil(text.length / 4) }, { headers: { "cache-control": "no-store" } });
+  const requested = typeof claude.model === "string" ? claude.model : candidate.model;
+  const translated = await claudeToResponses(claude, candidate.model);
+  const body = JSON.stringify(translated.body);
+  // The client's own headers describe a Claude request, so none of them go upstream.
+  const bare = new Request(request.url, { method: "POST" });
+  let upstream: Response | null;
+  let accessToken = "";
+  if (candidate.credential.id === CODEX_LOGIN_ID) {
+    const access = await codexAccess(config);
+    if (access instanceof Response) return formatError("claude", access.status, "api_error", await upstreamMessage(access));
+    accessToken = access.token;
+    upstream = await config.upstream(codexRequest(bare, access.token, access.accountId, body)).catch(() => null);
+  } else {
+    upstream = await config.upstream(providerRequest(bare, url, { ...route, format: "openai-response" }, candidate.credential, candidate.model, body)).catch(() => null);
+  }
+  if (upstream === null) return formatError("claude", 502, "api_error", "The upstream couldn't be reached.");
+  if (!upstream.ok) {
+    if (upstream.status === 401 && accessToken !== "") {
+      config.cache.codexToken = null;
+      await config.backend.invalidate(accessToken);
+    }
+    return formatError("claude", upstream.status, upstream.status === 429 ? "rate_limit_error" : "api_error", await upstreamMessage(upstream));
+  }
+  if (translated.stream && upstream.body !== null) {
+    const stream = claudeEventStream(upstream.body, new ClaudeStream(requested, translated.toolNames));
+    return new Response(stream, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" } });
+  }
+  const final = await collected(upstream);
+  if (!final.ok) return formatError("claude", final.status, "api_error", await upstreamMessage(final));
+  return Response.json(claudeMessage((await final.json()) as Record<string, unknown>, requested, translated.toolNames), { headers: { "cache-control": "no-store" } });
+}
+
 // Statuses after which another credential may well succeed.
 const RETRY_STATUSES = new Set([401, 403, 408, 429, 500, 502, 503, 504, 529]);
 const MAX_ATTEMPTS = 3;
@@ -229,8 +291,8 @@ function requestBody(text: string): RequestBody {
 
 async function proxied(request: Request, url: URL, route: Route & { format: Format }, config: AppConfig): Promise<Response> {
   const table = await routingTable(config);
-  // Claude clients with only subscription logins configured: stream the body through unread.
-  if (route.format === "claude" && !table.credentials.some((credential) => credential.kind === "claude")) {
+  // Claude clients with only Claude logins configured: stream the body through unread.
+  if (route.format === "claude" && !table.codexOAuth && !table.credentials.some((credential) => servable("claude", credential.kind))) {
     return viaClaudeLogin(request, url, config);
   }
   const length = Number(request.headers.get("content-length") ?? "0");
@@ -240,10 +302,12 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   const model = route.geminiModel ?? parsed?.model ?? null;
   if (model === null) return formatError(route.format, 400, "invalid_request_error", "The request needs a model.");
   const found = candidates(table, model);
-  const usable = found.filter((candidate) => NATIVE_FORMAT[candidate.credential.kind] === route.format);
+  const usable = found.filter((candidate) => servable(route.format, candidate.credential.kind));
   if (route.format === "claude" && table.claudeOAuth && /^claude-/i.test(model)) usable.push(loginCandidate("claude", model));
   // ChatGPT logins take Codex's own models, and any Responses model nothing else serves.
   if (route.format === "openai-response" && table.codexOAuth && (inDefaultFamily("codex", model) || usable.length === 0)) usable.push(loginCandidate("codex", model));
+  // Claude Code asking for a ChatGPT model by name, e.g. ANTHROPIC_MODEL=gpt-5.6-sol.
+  if (route.format === "claude" && table.codexOAuth && inDefaultFamily("codex", model)) usable.push(loginCandidate("codex", model));
   if (usable.length === 0) {
     if (route.format === "claude" && table.claudeOAuth) return viaClaudeLogin(request, url, config, text);
     const reason =
@@ -258,8 +322,12 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   for (const [index, candidate] of attempts.entries()) {
     const isLast = index === attempts.length - 1;
     const body = parsed === null || candidate.model === model ? text : parsed.withModel(candidate.model);
-    if (candidate.credential.id === CLAUDE_LOGIN_ID || candidate.credential.id === CODEX_LOGIN_ID) {
-      const response = candidate.credential.id === CLAUDE_LOGIN_ID ? await viaClaudeLogin(request, url, config, body) : await viaCodexLogin(request, url, config, body);
+    const translated = route.format !== NATIVE_FORMAT[candidate.credential.kind];
+    if (translated || candidate.credential.id === CLAUDE_LOGIN_ID || candidate.credential.id === CODEX_LOGIN_ID) {
+      let response: Response;
+      if (translated) response = await viaResponses(request, url, route, config, candidate, text);
+      else if (candidate.credential.id === CLAUDE_LOGIN_ID) response = await viaClaudeLogin(request, url, config, body);
+      else response = await viaCodexLogin(request, url, config, body);
       if (isLast || !RETRY_STATUSES.has(response.status)) return response;
       await response.body?.cancel();
       last = new Response(null, { status: response.status });

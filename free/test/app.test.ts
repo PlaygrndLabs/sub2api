@@ -533,3 +533,112 @@ describe("ChatGPT (Codex) logins", () => {
     expect(backend.calls).not.toContain("codexToken");
   });
 });
+
+describe("Claude Code on ChatGPT logins and Codex keys", () => {
+  const sse = (events: unknown[]) => new Response(events.map((event) => `event: x\ndata: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+  const answer = () =>
+    sse([
+      { type: "response.created", response: { id: "resp_1" } },
+      { type: "response.output_text.delta", delta: "Hi" },
+      { type: "response.completed", response: { id: "resp_1", output: [{ type: "message", content: [{ type: "output_text", text: "Hi" }] }], usage: { input_tokens: 3, output_tokens: 1 } } },
+    ]);
+
+  async function loginSetup(upstream: (request: Request) => Promise<Response> = async () => answer()) {
+    const fixture = await setup(upstream);
+    fixture.backend.table = { credentials: [], claudeOAuth: true, codexOAuth: true };
+    return fixture;
+  }
+
+  it("translates a Claude Code request for a ChatGPT model and streams Anthropic events back", async () => {
+    const { config, seen } = await loginSetup();
+    const body = '{"model":"gpt-5.6-sol","max_tokens":8,"stream":true,"system":"Be brief.","messages":[{"role":"user","content":"hello"}]}';
+    const response = await handle(messages({ "x-api-key": KEY, "anthropic-version": "2023-06-01", "x-claude-code-session-id": "s" }, body), config);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toMatch(/^text\/event-stream/);
+    const text = await response.text();
+    expect(text).toContain("event: message_start");
+    expect(text).toContain('"text_delta","text":"Hi"');
+    expect(text).toContain("event: message_stop");
+    const [sent] = seen;
+    expect(sent?.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+    expect(sent?.headers.get("authorization")).toBe("Bearer chatgpt-1");
+    expect(sent?.headers.get("chatgpt-account-id")).toBe("acct-1");
+    expect(sent?.headers.get("x-api-key")).toBeNull();
+    expect(sent?.headers.get("anthropic-version")).toBeNull();
+    expect(sent?.headers.get("x-claude-code-session-id")).toBeNull();
+    expect(await sent?.json()).toMatchObject({ model: "gpt-5.6-sol", stream: true, store: false, input: [{ role: "developer" }, { role: "user", content: [{ type: "input_text", text: "hello" }] }] });
+  });
+
+  it("answers a non-streaming request and counts tokens without an upstream call", async () => {
+    const { config, seen } = await loginSetup();
+    const whole = await handle(messages({ "x-api-key": KEY }, '{"model":"gpt-5.6-sol","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}'), config);
+    expect(await whole.json()).toMatchObject({ type: "message", model: "gpt-5.6-sol", content: [{ type: "text", text: "Hi" }], stop_reason: "end_turn" });
+    const count = await handle(at("/v1/messages/count_tokens", { method: "POST", headers: { "x-api-key": KEY }, body: '{"model":"gpt-5.6-sol","messages":[]}' }), config);
+    expect(await count.json()).toEqual({ input_tokens: 10 });
+    expect(seen).toHaveLength(1);
+  });
+
+  it("returns upstream errors in Anthropic's shape and refreshes a refused token", async () => {
+    const { config, backend } = await loginSetup(async () => Response.json({ detail: "Unsupported model" }, { status: 401 }));
+    const response = await handle(messages({ "x-api-key": KEY }, '{"model":"gpt-5.6-sol","stream":true,"messages":[]}'), config);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ type: "error", error: { type: "api_error", message: "Unsupported model" } });
+    expect(backend.invalidated).toEqual(["chatgpt-1"]);
+  });
+
+  it("still sends Claude models to the Claude login, body unread", async () => {
+    const { config, seen, backend } = await loginSetup(async () => new Response("{}"));
+    await handle(messages({ "x-api-key": KEY }), config);
+    expect(seen[0]?.url).toBe("https://api.anthropic.com/v1/messages");
+    backend.table = { credentials: [], claudeOAuth: true, codexOAuth: false };
+    config.cache.forgetConfig();
+    const request = messages({ "x-api-key": KEY });
+    const text = request.text.bind(request);
+    let read = false;
+    request.text = async () => {
+      read = true;
+      return text();
+    };
+    await handle(request, config);
+    expect(read).toBe(false);
+    expect(seen[1]?.url).toBe("https://api.anthropic.com/v1/messages");
+  });
+
+  it("serves a Claude request from a Codex API key through the translator", async () => {
+    const { config, seen } = await providersSetup(async () => answer());
+    const response = await handle(messages({ "x-api-key": KEY }, '{"model":"gpt-5.6-sol","stream":true,"messages":[{"role":"user","content":"hi"}]}'), config);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("message_stop");
+    expect(seen[0]?.url).toBe("https://api.openai.com/v1/responses");
+    expect(seen[0]?.headers.get("authorization")).toBe("Bearer sk-openai");
+  });
+
+  it("translates a 600 KB Claude Code request within the CPU budget", async () => {
+    const history = Array.from({ length: 400 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: [{ type: "text", text: "x".repeat(1500) }] }));
+    const tools = Array.from({ length: 30 }, (_, index) => ({ name: `tool_${index}`, description: "d".repeat(300), input_schema: { type: "object", properties: { a: { type: "string" } } } }));
+    const body = JSON.stringify({ model: "gpt-5.6-sol", max_tokens: 32000, stream: true, tools, messages: history });
+    expect(body.length).toBeGreaterThan(600_000);
+    const { config } = await loginSetup(async (request) => {
+      await request.arrayBuffer();
+      return answer();
+    });
+    const runs = 30;
+    let baseline = 0;
+    let total = 0;
+    for (let run = 0; run < runs + 3; run += 1) {
+      const start = process.cpuUsage();
+      await messages({ "x-api-key": KEY }, body).arrayBuffer();
+      const middle = process.cpuUsage();
+      await (await handle(messages({ "x-api-key": KEY }, body), config)).text();
+      const end = process.cpuUsage();
+      if (run < 3) continue;
+      baseline += (middle.user - start.user + middle.system - start.system) / 1000;
+      total += (end.user - middle.user + end.system - middle.system) / 1000;
+    }
+    const gateway = (total - baseline) / runs;
+    console.log(`CPU per 600 KB translated request: ${gateway.toFixed(2)} ms in the gateway`);
+    // Parsing, translating and re-serialising is the costliest path the gateway has (about 6 ms
+    // here), so this gate leaves CI machines some room while still catching a regression.
+    expect(gateway).toBeLessThan(9);
+  });
+});
