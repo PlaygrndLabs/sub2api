@@ -1,36 +1,50 @@
-# sub2api for the Workers Free plan (spike)
+# sub2api for the Workers Free plan
 
-A container-free version of sub2api that runs on Cloudflare's **free** Workers plan. It is a small TypeScript gateway, not CPA, and for now it covers **Claude subscriptions only**:
+A container-free version of sub2api that runs on Cloudflare's **free** Workers plan. It is a TypeScript rewrite of CPA (CLIProxyAPI), not CPA itself, and serves **CPA's own dashboard** (Cli-Proxy-API-Management-Center) through a port of CPA's v8 management API. So both installs look and work the same in the browser.
 
-- Claude OAuth login (the same PKCE flow as CPA and Claude Code), with the token refreshed automatically.
+It covers **Claude subscriptions** today; other providers and formats are coming in later phases.
+
+- CPA's dashboard, downloaded at build time from the latest panel release (pin one with `PANEL_VERSION`).
+- Claude OAuth login from the dashboard's **OAuth Login** page (the same PKCE flow as CPA and Claude Code), with tokens refreshed automatically.
+- Several Claude logins, used in turn. Upload, download, disable, edit and delete them under **Auth Files**, in CPA's auth-file format, so files move between the two installs.
+- CPA's YAML config, edited in the **Config Panel**. Client API keys live in `access.api-keys`, as in CPA.
 - `POST /v1/messages`, `POST /v1/messages/count_tokens` and `GET /v1/models`, streamed straight through to Anthropic.
-- API keys and the Claude login live in one SQLite-backed Durable Object, which the free plan includes.
-- A password-protected dashboard at `/` for connecting the account and managing keys.
+- Everything is stored in one SQLite-backed Durable Object, which the free plan includes.
 
 Request bodies are never parsed, so a Worker spends well under 1 ms of its 10 ms CPU budget even on a 600 KB Claude Code request (see the CPU test in `test/app.test.ts`).
 
-Not included: OpenAI/Gemini formats, Codex and Gemini accounts, multiple accounts, and CPA's request rewriting. Clients other than Claude Code may be refused by Anthropic when they use a subscription token.
+Not included yet: OpenAI/Gemini formats, Codex, Gemini and other accounts, usage statistics and request logs. Deliberately left out: CPA's request cloaking and TLS fingerprint spoofing. Clients other than Claude Code may be refused by Anthropic when they use a subscription token.
 
 ## Try it
 
 You need a Cloudflare account. The free plan is enough.
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free)
+
+It asks for `DASHBOARD_PASSWORD` (at least 16 characters) and optionally `MANAGEMENT_KEY`. Or from a clone:
+
 ```bash
-npm ci
+cd free && npm ci
 npx wrangler login
-npx wrangler deploy -c free/wrangler.jsonc
-npx wrangler secret put DASHBOARD_PASSWORD -c free/wrangler.jsonc   # at least 16 characters
+npx wrangler deploy
+npx wrangler secret put DASHBOARD_PASSWORD   # at least 16 characters
+npx wrangler secret put MANAGEMENT_KEY       # optional; defaults to the dashboard password
 ```
 
-1. Open `https://sub2api-free.<your-subdomain>.workers.dev` and sign in.
-2. Press **Connect Claude**, approve on Claude's page, then paste the `localhost` address you land on.
-3. Create an API key, then point Claude Code at the gateway:
+1. Open `https://sub2api-free.<your-subdomain>.workers.dev` and sign in with the dashboard password.
+2. CPA's dashboard opens and asks for the management key: enter `MANAGEMENT_KEY`, or the dashboard password if you didn't set one.
+3. Under **OAuth Login**, press **+** on Claude, approve on Claude's page, then paste the `localhost` address you land on into **Callback URL**.
+4. Under **Config Panel**, add an API key and save, then point Claude Code at the gateway:
 
 ```bash
 export ANTHROPIC_BASE_URL=https://sub2api-free.<your-subdomain>.workers.dev
 export ANTHROPIC_API_KEY=<your gateway API key>
 claude
 ```
+
+Keys and the login made with the first free release keep working: the old login is turned into an auth file on first use.
+
+The management API sits behind both the sign-in cookie and the management key. It is off when neither secret is at least 16 characters.
 
 ## Deploying from GitHub
 

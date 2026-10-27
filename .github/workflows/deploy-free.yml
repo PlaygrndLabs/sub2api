@@ -1,5 +1,6 @@
-# Deploys the free-plan gateway in free/ when it changes on main. Set its DASHBOARD_PASSWORD
-# once with `npx wrangler secret put DASHBOARD_PASSWORD -c free/wrangler.jsonc`.
+# Deploys the free-plan gateway in free/ when it changes on main. The build downloads the latest
+# CPA dashboard. Set its DASHBOARD_PASSWORD once with
+# `npx wrangler secret put DASHBOARD_PASSWORD` from free/.
 name: deploy free
 
 on:
@@ -38,13 +39,17 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: free/package-lock.json
+      # Installed and deployed from free/, as the Deploy button does, so the build step finds its script.
       - if: steps.creds.outputs.ready == 'true'
+        working-directory: free
         run: npm ci
       - name: Deploy
         id: deploy
         if: steps.creds.outputs.ready == 'true'
+        working-directory: free
         run: |
-          npx wrangler deploy -c free/wrangler.jsonc | tee deploy.log
+          npx wrangler deploy | tee deploy.log
           echo "url=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1)" >> "$GITHUB_OUTPUT"
       # Live check through the deployed gateway, using a gateway key stored as a repository
       # secret. Skipped until that secret exists. Nothing secret is printed.

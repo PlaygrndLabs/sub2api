@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { handle, type Forward, type GatewayConfig, type LoginLimiter } from "../src/gateway.ts";
 import { KeyGuard } from "../src/key-guard.ts";
 import { classify } from "../src/routes.ts";
-import { SESSION_COOKIE, issueSession, passwordMatches, readCookie, sessionIsValid } from "../src/session.ts";
+import { SESSION_COOKIE, issueSession, passwordMatches, readCookie, sessionIsValid } from "../free/src/session.ts";
 
 const PASSWORD = "correct-horse-battery-staple-0123456789";
 const NOW = 1_800_000_000;

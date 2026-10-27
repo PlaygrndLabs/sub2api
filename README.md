@@ -5,12 +5,17 @@
 
 **Literally the [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA) project, deployed as a Cloudflare Worker in one click.** Turn your Claude, ChatGPT Codex and Gemini subscriptions into your own private API. Point Claude Code, the Anthropic or OpenAI SDKs, or any app at your gateway URL and use your subscription from anywhere, with no server or home machine left running.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api)
+Two ways to install:
+
+| | Plan | What runs | Deploy |
+|---|---|---|---|
+| **Full** | Workers Paid ($5/month) | The latest CPA release in a container, with its official dashboard | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api) |
+| **Free** | Workers Free | Our container-free TypeScript gateway with CPA's own dashboard (Claude subscriptions today, more CPA features coming) | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free) |
 
 ## Why
 
 - **One click, no server.** Cloudflare builds and runs everything. Nothing to keep online.
-- **The real CPA.** Built from a pinned upstream release with its official dashboard, so every provider and API CPA supports just works: Anthropic Messages, OpenAI-compatible and Gemini.
+- **The real CPA.** Built from the latest upstream release with its official dashboard, rebuilt weekly, so every provider and API CPA supports just works: Anthropic Messages, OpenAI-compatible and Gemini.
 - **Private by default.** The dashboard sits behind a password, and every API call needs a key you create. Until then, all calls are refused.
 - **Logins that stick.** Config and OAuth logins live in your own R2 bucket and survive restarts and redeploys.
 - **Costs little when idle.** The container sleeps after 30 minutes and wakes on the next request.
@@ -19,9 +24,9 @@
 
 You need a Cloudflare account on the [Workers Paid plan](https://developers.cloudflare.com/workers/platform/pricing/) ($5/month; Containers require it).
 
-On the free plan? [free/](free/README.md) has an early, Claude-only version that needs no container.
+On the free plan? Use the **Free** button above instead; see [free/README.md](free/README.md).
 
-1. Press **Deploy to Cloudflare** above.
+1. Press the **Full** install's **Deploy to Cloudflare** button above.
 2. Set the two secrets it asks for. Each needs at least 32 characters of `A-Z a-z 0-9 _ -`; `openssl rand -hex 32` makes one:
    - `DASHBOARD_PASSWORD`: your dashboard sign-in password.
    - `MANAGEMENT_KEY`: CPA's management key, asked for after sign-in.
