@@ -6,6 +6,7 @@ on:
   push:
     branches: [claude/project-thread-y9ekd4]
     paths: ["free/**", ".github/workflows/deploy-free-preview.yml"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -54,3 +55,21 @@ jobs:
           echo "Encrypted dashboard password:"
           printf '%s' "$password" | openssl pkeyutl -encrypt -pubin -inkey recipient.pem -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 | base64 -w0
           echo
+      # Live check through the deployed gateway, using a gateway key stored as a repository
+      # secret. Skipped until that secret exists. Nothing secret is printed.
+      - name: Try Claude Code through the gateway
+        env:
+          ANTHROPIC_BASE_URL: https://sub2api-free.playgrndlabs.workers.dev
+          ANTHROPIC_API_KEY: ${{ secrets.SUB2API_FREE_TEST_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::notice::Skipping the live check: add the SUB2API_FREE_TEST_KEY repository secret."
+            exit 0
+          fi
+          echo "== GET /v1/models"
+          curl -sS -o models.json -w "HTTP %{http_code}\n" "$ANTHROPIC_BASE_URL/v1/models" -H "x-api-key: $ANTHROPIC_API_KEY"
+          head -c 400 models.json; echo
+          echo "== Claude Code, one prompt"
+          npx -y @anthropic-ai/claude-code -p "Reply with exactly: gateway works" --output-format text 2>&1 | tail -20
+          echo "== Claude Code, a longer streamed answer"
+          npx -y @anthropic-ai/claude-code -p "Count from 1 to 200, comma separated." --output-format text 2>&1 | tail -c 600
