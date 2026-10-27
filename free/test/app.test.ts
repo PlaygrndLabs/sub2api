@@ -424,6 +424,22 @@ describe("OAuth callback", () => {
   });
 });
 
+// The gateway's own CPU per request: each run's cost minus the test's cost of building and
+// draining the same request. The median keeps a stray garbage collection out of the result.
+async function gatewayCpuMs(request: () => Request, config: AppConfig): Promise<number> {
+  const samples: number[] = [];
+  for (let run = 0; run < 33; run += 1) {
+    const start = process.cpuUsage();
+    await request().arrayBuffer();
+    const middle = process.cpuUsage();
+    await (await handle(request(), config)).text();
+    const end = process.cpuUsage();
+    if (run >= 3) samples.push((end.user - middle.user + end.system - middle.system - (middle.user - start.user + middle.system - start.system)) / 1000);
+  }
+  samples.sort((a, b) => a - b);
+  return samples[Math.floor(samples.length / 2)] ?? 0;
+}
+
 // Workers Free allows 10 ms of CPU per request. Waiting on Anthropic doesn't count, so what
 // matters is the gateway's own work on a large Claude Code request. The body is never parsed,
 // so this stays far under budget even at several hundred KB.
@@ -459,20 +475,7 @@ describe("CPU budget", () => {
       return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
     });
     const request = () => post("/v1/chat/completions", JSON.parse(body));
-    const runs = 30;
-    let baseline = 0;
-    let total = 0;
-    for (let run = 0; run < runs + 3; run += 1) {
-      const start = process.cpuUsage();
-      await request().arrayBuffer();
-      const middle = process.cpuUsage();
-      await (await handle(request(), config)).text();
-      const end = process.cpuUsage();
-      if (run < 3) continue;
-      baseline += (middle.user - start.user + middle.system - start.system) / 1000;
-      total += (end.user - middle.user + end.system - middle.system) / 1000;
-    }
-    const gateway = (total - baseline) / runs;
+    const gateway = await gatewayCpuMs(request, config);
     console.log(`CPU per 600 KB rewritten request: ${gateway.toFixed(2)} ms in the gateway`);
     expect(gateway).toBeLessThan(8);
   });
@@ -613,6 +616,20 @@ describe("Claude Code on ChatGPT logins and Codex keys", () => {
     expect(seen[0]?.headers.get("authorization")).toBe("Bearer sk-openai");
   });
 
+  it("serves Claude Code from an OpenAI-compatible key through the Chat translator", async () => {
+    const chat = () => new Response(`data: ${JSON.stringify({ id: "chatcmpl-1", choices: [{ delta: { content: "Hi" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } });
+    const { config, seen } = await providersSetup(async () => chat());
+    const response = await handle(messages({ "x-api-key": KEY, "x-session": "s-1" }, '{"model":"kimi","stream":true,"messages":[{"role":"user","content":"hi"}]}'), config);
+    const text = await response.text();
+    expect(text).toContain('"text_delta","text":"Hi"');
+    expect(text).toContain('"stop_reason":"end_turn"');
+    const [sent] = seen;
+    expect(sent?.url).toBe("https://router.example/api/v1/chat/completions");
+    expect(sent?.headers.get("authorization")).toBe("Bearer sk-router-1");
+    expect(sent?.headers.get("x-api-key")).toBeNull();
+    expect(await sent?.json()).toMatchObject({ model: "vendor/kimi-k2:free", stream: true, messages: [{ role: "user", content: "hi" }] });
+  });
+
   it("translates a 600 KB Claude Code request within the CPU budget", async () => {
     const history = Array.from({ length: 400 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: [{ type: "text", text: "x".repeat(1500) }] }));
     const tools = Array.from({ length: 30 }, (_, index) => ({ name: `tool_${index}`, description: "d".repeat(300), input_schema: { type: "object", properties: { a: { type: "string" } } } }));
@@ -622,20 +639,7 @@ describe("Claude Code on ChatGPT logins and Codex keys", () => {
       await request.arrayBuffer();
       return answer();
     });
-    const runs = 30;
-    let baseline = 0;
-    let total = 0;
-    for (let run = 0; run < runs + 3; run += 1) {
-      const start = process.cpuUsage();
-      await messages({ "x-api-key": KEY }, body).arrayBuffer();
-      const middle = process.cpuUsage();
-      await (await handle(messages({ "x-api-key": KEY }, body), config)).text();
-      const end = process.cpuUsage();
-      if (run < 3) continue;
-      baseline += (middle.user - start.user + middle.system - start.system) / 1000;
-      total += (end.user - middle.user + end.system - middle.system) / 1000;
-    }
-    const gateway = (total - baseline) / runs;
+    const gateway = await gatewayCpuMs(() => messages({ "x-api-key": KEY }, body), config);
     console.log(`CPU per 600 KB translated request: ${gateway.toFixed(2)} ms in the gateway`);
     // Parsing, translating and re-serialising is the costliest path the gateway has (about 6 ms
     // here), so this gate leaves CI machines some room while still catching a regression.
