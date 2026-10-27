@@ -64,7 +64,7 @@ jobs:
             exit 0
           fi
           echo "== GET /v1/models"
-          curl -sS -o models.json -w "HTTP %{http_code}\n" "$ANTHROPIC_BASE_URL/v1/models" -H "x-api-key: $ANTHROPIC_API_KEY"
+          curl -sS -o models.json -w "HTTP %{http_code}\n" "$ANTHROPIC_BASE_URL/v1/models" -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01"
           head -c 400 models.json; echo
           echo "== Claude Code, one prompt"
           npx -y @anthropic-ai/claude-code -p "Reply with exactly: gateway works" --output-format text 2>&1 | tail -20

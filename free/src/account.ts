@@ -1,5 +1,6 @@
 import { OAuthError, authorizeUrl, exchangeCode, parseCallback, randomToken, refresh, type Credential, type Fetcher } from "./claude-oauth.ts";
 import { Config } from "./config.ts";
+import { upstreamCredentials, type RoutingTable, type UpstreamCredential } from "./providers.ts";
 import { claudeCredential, claudeFileData, type CredentialFile, type LoginSession, type Vault } from "./vault.ts";
 
 export type TokenResult = { ok: true; accessToken: string; expiresAt: number } | { ok: false; status: number; message: string };
@@ -12,6 +13,7 @@ export interface Backend {
   invalidate(accessToken: string): Promise<void>;
   attemptAllowed(client: string): Promise<boolean>;
   manage(request: Request): Promise<Response>;
+  routing(): Promise<RoutingTable>;
 }
 
 export const REFRESH_MARGIN_SECONDS = 5 * 60;
@@ -25,6 +27,7 @@ export async function hashKey(key: string): Promise<string> {
 
 export class Account {
   private config: Config | null = null;
+  private upstreams: UpstreamCredential[] | null = null;
   private keyHashes: Set<string> | null = null;
   private readonly refreshing = new Map<string, Promise<TokenResult>>();
   private readonly lastForcedRefresh = new Map<string, number>();
@@ -45,6 +48,14 @@ export class Account {
     this.vault.saveConfigText(config.text);
     this.config = config;
     this.keyHashes = null;
+    this.upstreams = null;
+  }
+
+  // What the Worker needs to pick an upstream for a request: the configured API-key providers
+  // and whether any Claude login is on.
+  async routing(): Promise<RoutingTable> {
+    this.upstreams ??= upstreamCredentials(this.currentConfig().read([]));
+    return { credentials: this.upstreams, claudeOAuth: this.claudeFiles().length > 0 };
   }
 
   async keyValid(hash: string): Promise<boolean> {

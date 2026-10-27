@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { hashKey, type Backend, type TokenResult } from "../src/account.ts";
 import { EdgeCache, handle, type AppConfig } from "../src/app.ts";
+import { upstreamCredentials, type RoutingTable } from "../src/providers.ts";
 import { OAUTH_BETA } from "../src/proxy.ts";
 import { SESSION_COOKIE, issueSession } from "../src/session.ts";
 
@@ -31,6 +32,11 @@ class FakeBackend implements Backend {
   }
   async attemptAllowed() {
     return true;
+  }
+  table: RoutingTable = { credentials: [], claudeOAuth: true };
+  async routing() {
+    this.calls.push("routing");
+    return this.table;
   }
   async manage(request: Request) {
     this.managed.push(request);
@@ -114,6 +120,13 @@ describe("API proxy", () => {
     expect(await sent?.text()).toContain("claude-sonnet-5-5");
   });
 
+  it("never forwards the gateway key, even from the query string", async () => {
+    const { config, seen } = await setup();
+    await handle(at(`/v1/messages?beta=true&key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(seen[0]?.url).toBe("https://api.anthropic.com/v1/messages?beta=true");
+    expect([...(seen[0]?.headers.values() ?? [])].join(" ")).not.toContain(KEY);
+  });
+
   it("accepts the key as a bearer token and keeps the query string", async () => {
     const { config, seen } = await setup();
     await handle(at("/v1/messages/count_tokens?beta=true", { method: "POST", headers: { authorization: `Bearer ${KEY}` }, body: "{}" }), config);
@@ -134,7 +147,7 @@ describe("API proxy", () => {
     const { config, backend } = await setup();
     await handle(messages({ "x-api-key": KEY }), config);
     await handle(messages({ "x-api-key": KEY }), config);
-    expect(backend.calls).toEqual(["keyValid", "token"]);
+    expect(backend.calls).toEqual(["keyValid", "routing", "token"]);
   });
 
   it("drops the token and tells the store when Anthropic refuses it", async () => {
@@ -154,11 +167,135 @@ describe("API proxy", () => {
     expect(seen).toHaveLength(0);
   });
 
-  it("serves only the Claude endpoints, with their methods", async () => {
+  it("checks each endpoint's method", async () => {
     const { config } = await setup();
-    expect((await handle(at("/v1/models", { headers: { "x-api-key": KEY } }), config)).status).toBe(200);
+    expect((await handle(at("/v1/models", { headers: { "x-api-key": KEY, "anthropic-version": "2023-06-01" } }), config)).status).toBe(200);
     expect((await handle(at("/v1/messages", { headers: { "x-api-key": KEY } }), config)).status).toBe(405);
-    expect((await handle(at("/v1/chat/completions", { method: "POST", headers: { "x-api-key": KEY } }), config)).status).toBe(404);
+    expect((await handle(at("/v1/embeddings", { method: "POST", headers: { "x-api-key": KEY } }), config)).status).toBe(404);
+  });
+});
+
+const PROVIDERS = {
+  "api-keys": {
+    "openai-compatibility": [
+      {
+        name: "router",
+        "base-url": "https://router.example/api/v1/",
+        headers: { "X-Title": "gateway", "X-Session": "$x-session" },
+        models: [{ name: "vendor/kimi-k2:free", alias: "kimi" }, { name: "deepseek-v3" }],
+        keys: [{ "api-key": "sk-router-1", weight: 3 }, { "api-key": "sk-router-2" }],
+      },
+    ],
+    gemini: [{ name: "g", keys: [{ "api-key": "AIza-1" }], "excluded-models": ["*-pro"] }],
+    claude: [{ name: "c", prefix: "work", keys: [{ "api-key": "sk-ant-1" }] }],
+    codex: [{ name: "x", "base-url": "https://api.openai.com/v1", keys: [{ "api-key": "sk-openai" }] }],
+  },
+};
+
+async function providersSetup(upstream: (request: Request) => Promise<Response> = async () => new Response("{}")) {
+  const fixture = await setup(upstream);
+  fixture.backend.table = { credentials: upstreamCredentials(PROVIDERS), claudeOAuth: true };
+  return fixture;
+}
+
+function post(path: string, body: unknown, headers: Record<string, string> = {}): Request {
+  return at(path, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${KEY}`, ...headers }, body: JSON.stringify(body) });
+}
+
+describe("API-key providers", () => {
+  it("reads CPA's api-keys groups, with key overrides and defaults", () => {
+    const credentials = upstreamCredentials(PROVIDERS);
+    expect(credentials.map((credential) => [credential.id, credential.baseUrl])).toEqual([
+      ["claude/c/0", "https://api.anthropic.com"],
+      ["gemini/g/0", "https://generativelanguage.googleapis.com"],
+      ["codex/x/0", "https://api.openai.com/v1"],
+      ["openai-compatibility/router/0", "https://router.example/api/v1"],
+      ["openai-compatibility/router/1", "https://router.example/api/v1"],
+    ]);
+    expect(upstreamCredentials({ "api-keys": { claude: [{ "base-url": "http://plain.example", keys: [{ "api-key": "k" }] }] } })).toEqual([]);
+  });
+
+  it("sends an OpenAI chat request to the provider serving the alias, with its upstream name", async () => {
+    const { config, seen } = await providersSetup();
+    const response = await handle(post("/v1/chat/completions", { model: "kimi", messages: [] }, { "x-session": "s-1" }), config);
+    expect(response.status).toBe(200);
+    const [sent] = seen;
+    expect(sent?.url).toBe("https://router.example/api/v1/chat/completions");
+    expect(sent?.headers.get("authorization")).toBe("Bearer sk-router-1");
+    expect(sent?.headers.get("x-title")).toBe("gateway");
+    expect(sent?.headers.get("x-session")).toBe("s-1");
+    expect(await sent?.json()).toEqual({ model: "vendor/kimi-k2:free", messages: [] });
+  });
+
+  it("finds the model wherever the client put it, and rewrites only that field", async () => {
+    const { config, seen } = await providersSetup();
+    await handle(post("/v1/chat/completions", { messages: [{ role: "user", content: '"model":"kimi"' }], model: "kimi" }), config);
+    expect(await seen[0]?.json()).toEqual({ messages: [{ role: "user", content: '"model":"kimi"' }], model: "vendor/kimi-k2:free" });
+    await handle(at("/v1/chat/completions", { method: "POST", headers: { authorization: `Bearer ${KEY}` }, body: ' { "model" : "k\\u0069mi", "x": "\\"" }' }), config);
+    expect(await seen[1]?.text()).toBe(' { "model" : "vendor/kimi-k2:free", "x": "\\"" }');
+  });
+
+  it("shares requests between keys by weight", async () => {
+    const { config, seen } = await providersSetup();
+    for (let turn = 0; turn < 4; turn += 1) await handle(post("/v1/chat/completions", { model: "deepseek-v3" }), config);
+    expect(seen.map((request) => request.headers.get("authorization"))).toEqual(["Bearer sk-router-1", "Bearer sk-router-1", "Bearer sk-router-2", "Bearer sk-router-1"]);
+  });
+
+  it("tries the next key when one is rate limited", async () => {
+    let calls = 0;
+    const { config, seen } = await providersSetup(async () => (calls++ === 0 ? new Response("slow down", { status: 429 }) : Response.json({ ok: true })));
+    const response = await handle(post("/v1/chat/completions", { model: "kimi" }), config);
+    expect(response.status).toBe(200);
+    expect(seen.map((request) => request.headers.get("authorization"))).toEqual(["Bearer sk-router-1", "Bearer sk-router-2"]);
+  });
+
+  it("serves Gemini clients, with the gateway key taken from ?key= and not forwarded", async () => {
+    const { config, seen } = await providersSetup();
+    const request = at(`/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${KEY}`, { method: "POST", body: "{}" });
+    expect((await handle(request, config)).status).toBe(200);
+    expect(seen[0]?.url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse");
+    expect(seen[0]?.headers.get("x-goog-api-key")).toBe("AIza-1");
+    const refused = await handle(at(`/v1beta/models/gemini-2.5-pro:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toMatchObject({ error: { code: 400, status: "INVALID_ARGUMENT" } });
+  });
+
+  it("sends Responses requests to Codex keys", async () => {
+    const { config, seen } = await providersSetup();
+    await handle(post("/v1/responses", { model: "gpt-5.5", input: "hi" }), config);
+    expect(seen[0]?.url).toBe("https://api.openai.com/v1/responses");
+    expect(seen[0]?.headers.get("authorization")).toBe("Bearer sk-openai");
+  });
+
+  it("reaches a prefixed Claude key with prefix/model, and the subscription login otherwise", async () => {
+    const { config, seen } = await providersSetup();
+    await handle(post("/v1/messages", { model: "work/claude-sonnet-5-5", messages: [] }, { "anthropic-version": "2023-06-01" }), config);
+    expect(seen[0]?.headers.get("x-api-key")).toBe("sk-ant-1");
+    expect(seen[0]?.headers.get("authorization")).toBeNull();
+    expect(await seen[0]?.json()).toMatchObject({ model: "claude-sonnet-5-5" });
+    await handle(post("/v1/messages", { model: "not-a-claude-model", messages: [] }), config);
+    expect(seen[1]?.headers.get("authorization")).toBe("Bearer access-1");
+  });
+
+  it("explains a model no provider serves, in the client's error shape", async () => {
+    const { config, backend, seen } = await providersSetup();
+    const unknown = await handle(post("/v1/chat/completions", { model: "nothing" }), config);
+    expect(unknown.status).toBe(400);
+    expect(await unknown.json()).toMatchObject({ error: { type: "invalid_request_error", message: expect.stringMatching(/No provider is configured for model nothing/) } });
+    const wrongShape = await handle(post("/v1/chat/completions", { model: "gemini-2.5-flash" }), config);
+    expect(await wrongShape.json()).toMatchObject({ error: { message: expect.stringMatching(/gemini provider, which doesn't take this request format yet/) } });
+    backend.table = { ...backend.table, claudeOAuth: false };
+    config.cache.forgetConfig();
+    expect((await handle(post("/v1/messages", { model: "x" }), config)).status).toBe(400);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("lists configured models in each client's shape", async () => {
+    const { config } = await providersSetup();
+    const openai = (await (await handle(at("/v1/models", { headers: { authorization: `Bearer ${KEY}` } }), config)).json()) as { data: { id: string }[] };
+    expect(openai.data.map((model) => model.id)).toEqual(["kimi", "deepseek-v3"]);
+    const gemini = await (await handle(at(`/v1beta/models?key=${KEY}`), config)).json();
+    expect(gemini).toEqual({ models: [] });
   });
 });
 
@@ -274,5 +411,31 @@ describe("CPU budget", () => {
     const total = await cpuMs(async () => (await handle(messages({ "x-api-key": KEY }, body), config)).text());
     console.log(`CPU per 600 KB request: ${total.toFixed(2)} ms in all, ${(total - baseline).toFixed(2)} ms in the gateway`);
     expect(total - baseline).toBeLessThan(5);
+  });
+
+  it("reads and rewrites a 600 KB request for an API-key provider within budget", async () => {
+    const history = Array.from({ length: 400 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: "x".repeat(1500) }));
+    const body = JSON.stringify({ model: "kimi", stream: true, messages: history });
+    const { config } = await providersSetup(async (request) => {
+      await request.arrayBuffer();
+      return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+    });
+    const request = () => post("/v1/chat/completions", JSON.parse(body));
+    const runs = 30;
+    let baseline = 0;
+    let total = 0;
+    for (let run = 0; run < runs + 3; run += 1) {
+      const start = process.cpuUsage();
+      await request().arrayBuffer();
+      const middle = process.cpuUsage();
+      await (await handle(request(), config)).text();
+      const end = process.cpuUsage();
+      if (run < 3) continue;
+      baseline += (middle.user - start.user + middle.system - start.system) / 1000;
+      total += (end.user - middle.user + end.system - middle.system) / 1000;
+    }
+    const gateway = (total - baseline) / runs;
+    console.log(`CPU per 600 KB rewritten request: ${gateway.toFixed(2)} ms in the gateway`);
+    expect(gateway).toBeLessThan(8);
   });
 });
