@@ -112,7 +112,7 @@ npm run verify              # typecheck, lint, unit tests
 sh test/container-smoke.sh  # needs Docker: runs CPA against the R2 shim
 ```
 
-To upgrade CPA, change `CPA_COMMIT` in `container/Dockerfile` together with a matching dashboard release (`PANEL_VERSION`, `PANEL_SHA256`).
+The container builds the newest CPA release and dashboard by default. To freeze them, set `CPA_VERSION`, `PANEL_VERSION` and `PANEL_SHA256` in `container/Dockerfile`.
 </details>
 
 ## Good to know

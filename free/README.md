@@ -4,7 +4,7 @@ A container-free version of sub2api that runs on Cloudflare's **free** Workers p
 
 It covers **Claude subscriptions** today; other providers and formats are coming in later phases.
 
-- CPA's dashboard, downloaded at build time from the latest panel release (pin one with `PANEL_VERSION`).
+- CPA's dashboard, downloaded at build time from the latest panel release (pin one with `PANEL_VERSION`, and its checksum with `PANEL_SHA256`).
 - Claude OAuth login from the dashboard's **OAuth Login** page (the same PKCE flow as CPA and Claude Code), with tokens refreshed automatically.
 - Several Claude logins, used in turn. Upload, download, disable, edit and delete them under **Auth Files**, in CPA's auth-file format, so files move between the two installs.
 - CPA's YAML config, edited in the **Config Panel**. Client API keys live in `access.api-keys`, as in CPA.
@@ -48,7 +48,7 @@ The management API sits behind both the sign-in cookie and the management key. I
 
 ## Deploying from GitHub
 
-With `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` set as repository secrets (the same ones the main deploy uses), `.github/workflows/deploy-free.yml` deploys this Worker whenever `free/` changes on `main`. Add a gateway API key as the `SUB2API_FREE_TEST_KEY` secret and each deploy also runs Claude Code through the gateway: one short prompt and one long streamed answer.
+With `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` set as repository secrets (the same ones the main deploy uses), `.github/workflows/deploy-free.yml` deploys this Worker whenever `free/` changes on `main`. Add a gateway API key as the `SUB2API_FREE_TEST_KEY` secret and each deploy also runs Claude Code through the gateway: one short prompt and one long streamed answer. To freeze the dashboard, set the `PANEL_VERSION` and `PANEL_SHA256` repository variables; each build log prints the SHA-256 of the dashboard it downloaded.
 
 ## Checked live
 

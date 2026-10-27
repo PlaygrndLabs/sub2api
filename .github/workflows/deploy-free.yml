@@ -19,12 +19,14 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    # The Cloudflare token goes only to the steps that call Cloudflare, never to npm install
+    # scripts or the Claude Code check.
     steps:
       - name: Check Cloudflare credentials
         id: creds
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
             echo "::notice::Skipping deploy: add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID as repository secrets to deploy from GitHub Actions."
@@ -34,6 +36,8 @@ jobs:
           fi
       - if: steps.creds.outputs.ready == 'true'
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - if: steps.creds.outputs.ready == 'true'
         uses: actions/setup-node@v4
         with:
@@ -48,11 +52,19 @@ jobs:
         id: deploy
         if: steps.creds.outputs.ready == 'true'
         working-directory: free
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Optional repository variables that freeze the dashboard; the build fails if the
+          # download doesn't match PANEL_SHA256.
+          PANEL_VERSION: ${{ vars.PANEL_VERSION }}
+          PANEL_SHA256: ${{ vars.PANEL_SHA256 }}
         run: |
           npx wrangler deploy | tee deploy.log
           echo "url=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1)" >> "$GITHUB_OUTPUT"
       # Live check through the deployed gateway, using a gateway key stored as a repository
-      # secret. Skipped until that secret exists. Nothing secret is printed.
+      # secret. Skipped until that secret exists. Nothing secret is printed. Claude Code is pinned
+      # so a new npm release never runs here unreviewed.
       - name: Try Claude Code through the gateway
         if: steps.creds.outputs.ready == 'true'
         env:
@@ -67,6 +79,6 @@ jobs:
           curl -sS -o models.json -w "HTTP %{http_code}\n" "$ANTHROPIC_BASE_URL/v1/models" -H "x-api-key: $ANTHROPIC_API_KEY"
           head -c 400 models.json; echo
           echo "== Claude Code, one prompt"
-          npx -y @anthropic-ai/claude-code -p "Reply with exactly: gateway works" --output-format text 2>&1 | tail -20
+          npx -y @anthropic-ai/claude-code@2.1.296 -p "Reply with exactly: gateway works" --output-format text 2>&1 | tail -20
           echo "== Claude Code, a longer streamed answer"
-          npx -y @anthropic-ai/claude-code -p "Count from 1 to 200, comma separated." --output-format text 2>&1 | tail -c 600
+          npx -y @anthropic-ai/claude-code@2.1.296 -p "Count from 1 to 200, comma separated." --output-format text 2>&1 | tail -c 600
