@@ -19,6 +19,8 @@
 
 You need a Cloudflare account on the [Workers Paid plan](https://developers.cloudflare.com/workers/platform/pricing/) ($5/month; Containers require it).
 
+On the free plan? [free/](free/README.md) has an early, Claude-only version that needs no container.
+
 1. Press **Deploy to Cloudflare** above.
 2. Set the two secrets it asks for. Each needs at least 32 characters of `A-Z a-z 0-9 _ -`; `openssl rand -hex 32` makes one:
    - `DASHBOARD_PASSWORD`: your dashboard sign-in password.
