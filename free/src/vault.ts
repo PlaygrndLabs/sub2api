@@ -7,7 +7,7 @@ export interface Sql {
 }
 
 // One login or key for an upstream provider, stored as the JSON a CPA auth file holds, so files
-// move between the paid and free installs unchanged.
+// move between the container and Workers-only installs unchanged.
 export interface CredentialFile {
   readonly name: string;
   readonly provider: string;
