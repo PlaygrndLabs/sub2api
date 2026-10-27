@@ -12,4 +12,8 @@ export default tseslint.config(
       "no-warning-comments": "error",
     },
   },
+  {
+    files: ["**/scripts/*.mjs"],
+    languageOptions: { globals: { process: "readonly", fetch: "readonly", URL: "readonly" } },
+  },
 );

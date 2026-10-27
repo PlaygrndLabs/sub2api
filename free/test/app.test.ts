@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hashKey, type Backend, type Overview, type TokenResult } from "../src/account.ts";
+import { hashKey, type Backend, type TokenResult } from "../src/account.ts";
 import { EdgeCache, handle, type AppConfig } from "../src/app.ts";
 import { OAUTH_BETA } from "../src/proxy.ts";
 import { SESSION_COOKIE, issueSession } from "../src/session.ts";
@@ -8,13 +8,15 @@ const PASSWORD = "correct-horse-battery-staple-0123456789";
 const NOW = 1_800_000_000;
 const KEY = "sk-s2a-client-key";
 const ORIGIN = "https://gateway.example";
+const MANAGEMENT_KEY = "m".repeat(40);
 
 class FakeBackend implements Backend {
   hashes = new Set<string>();
   tokenResult: TokenResult = { ok: true, accessToken: "access-1", expiresAt: NOW + 3600 };
   calls: string[] = [];
   invalidated: string[] = [];
-  finishError: string | null = null;
+  managed: Request[] = [];
+  answer: Response = Response.json({ status: "ok" });
 
   async keyValid(hash: string) {
     this.calls.push("keyValid");
@@ -27,28 +29,12 @@ class FakeBackend implements Backend {
   async invalidate(accessToken: string) {
     this.invalidated.push(accessToken);
   }
-  async overview(): Promise<Overview> {
-    return { account: null, keys: [] };
-  }
-  async createKey(name: string) {
-    this.calls.push(`createKey:${name}`);
-    return "sk-s2a-new";
-  }
-  async revokeKey(id: number) {
-    this.calls.push(`revokeKey:${id}`);
-  }
-  async startLogin() {
-    return "https://claude.ai/oauth/authorize?state=s";
-  }
-  async finishLogin(callback: string) {
-    this.calls.push(`finishLogin:${callback}`);
-    return this.finishError;
-  }
-  async disconnect() {
-    this.calls.push("disconnect");
-  }
   async attemptAllowed() {
     return true;
+  }
+  async manage(request: Request) {
+    this.managed.push(request);
+    return this.answer.clone();
   }
 }
 
@@ -59,11 +45,13 @@ async function setup(upstream: (request: Request) => Promise<Response> = async (
   const config: AppConfig = {
     backend,
     dashboardPassword: PASSWORD,
+    managementKey: MANAGEMENT_KEY,
     nowSeconds: () => NOW,
     upstream: async (request) => {
       seen.push(request);
       return upstream(request);
     },
+    panel: async () => new Response("<html>CPA panel</html>", { headers: { "content-type": "text/html" } }),
     cache: new EdgeCache(),
   };
   return { backend, seen, config };
@@ -193,42 +181,71 @@ describe("dashboard", () => {
     expect(crossSite.status).toBe(404);
   });
 
-  it("shows the dashboard to a signed-in visitor", async () => {
+  it("serves CPA's dashboard only to a signed-in visitor", async () => {
     const { config } = await setup();
-    const response = await handle(at("/", { headers: { cookie: await cookie() } }), config);
+    expect((await handle(at("/management.html"), config)).headers.get("location")).toBe("/login");
+    expect((await handle(at("/", { headers: { cookie: await cookie() } }), config)).headers.get("location")).toBe("/management.html");
+    const panel = await handle(at("/management.html", { headers: { cookie: await cookie() } }), config);
+    expect(await panel.text()).toContain("CPA panel");
+  });
+
+  it("signs out", async () => {
+    const { config } = await setup();
+    const response = await handle(at("/logout", { method: "POST" }), config);
+    expect(response.headers.get("set-cookie")).toMatch(/Max-Age=0/);
+  });
+});
+
+describe("management API", () => {
+  const managementCall = async (path: string, headers: Record<string, string>, init: RequestInit = {}) => at(path, { ...init, headers: { cookie: await cookie(), ...headers } });
+
+  it("needs both the sign-in cookie and the management key", async () => {
+    const { config, backend } = await setup();
+    expect((await handle(at("/v8/management/config", { headers: { authorization: `Bearer ${MANAGEMENT_KEY}` } }), config)).status).toBe(401);
+    expect((await handle(await managementCall("/v8/management/config", { authorization: "Bearer wrong" }), config)).status).toBe(401);
+    expect(backend.managed).toHaveLength(0);
+    const response = await handle(await managementCall("/v8/management/config", { "x-management-key": MANAGEMENT_KEY }), config);
     expect(response.status).toBe(200);
-    expect(await response.text()).toContain("Connect Claude");
+    expect(backend.managed[0]?.headers.get("cookie")).toBeNull();
   });
 
-  it("refuses dashboard posts from another origin or without a session", async () => {
-    const { config, backend } = await setup();
-    const foreign = await handle(at("/dashboard", form({ action: "disconnect" }, { origin: "https://evil.example", cookie: await cookie() })), config);
-    expect(foreign.status).toBe(404);
-    const anonymous = await handle(at("/dashboard", form({ action: "disconnect" })), config);
-    expect(anonymous.headers.get("location")).toBe("/login");
-    expect(backend.calls).toEqual([]);
+  it("is off until a long enough management key is set", async () => {
+    const { config } = await setup();
+    const off = { ...config, managementKey: "short" };
+    expect((await handle(await managementCall("/v8/management/config", { authorization: "Bearer short" }), off)).status).toBe(404);
   });
 
-  it("creates a key and shows it once, escaped", async () => {
+  it("answers the dashboard's v0 probe with the v8 config", async () => {
     const { config, backend } = await setup();
-    const response = await handle(at("/dashboard", form({ action: "create-key", name: "<laptop>" }, { cookie: await cookie() })), config);
-    expect(await response.text()).toContain("sk-s2a-new");
-    expect(backend.calls).toEqual(["createKey:<laptop>"]);
+    await handle(await managementCall("/v0/management/config?x=1", { authorization: `Bearer ${MANAGEMENT_KEY}` }), config);
+    expect(backend.managed[0]?.url).toBe(`${ORIGIN}/v8/management/config?x=1`);
   });
 
-  it("starts and finishes a Claude login", async () => {
+  it("forgets cached keys after a config write", async () => {
+    const { config } = await setup();
+    config.cache.keys.set("hash", NOW + 60);
+    await handle(await managementCall("/v8/management/config", { authorization: `Bearer ${MANAGEMENT_KEY}` }, { method: "PATCH", body: "{}" }), config);
+    expect(config.cache.keys.size).toBe(0);
+  });
+});
+
+describe("OAuth callback", () => {
+  it("needs sign-in, then hands the code to the store", async () => {
     const { config, backend } = await setup();
-    const started = await handle(at("/dashboard", form({ action: "start-login" }, { cookie: await cookie() })), config);
-    expect(await started.text()).toContain("https://claude.ai/oauth/authorize?state=s");
+    expect((await handle(at("/callback?code=c&state=s"), config)).status).toBe(401);
     config.cache.token = { value: "old", expiresAt: NOW + 3600 };
-    const finished = await handle(at("/dashboard", form({ action: "finish-login", callback: "abc#s" }, { cookie: await cookie() })), config);
-    expect(await finished.text()).toContain("Claude account connected.");
-    expect(backend.calls).toContain("finishLogin:abc#s");
+    const done = await handle(at("/callback?code=c&state=s", { headers: { cookie: await cookie() } }), config);
+    expect(await done.text()).toContain("Login received");
+    expect(backend.managed[0]?.url).toBe(`${ORIGIN}/v8/management/oauth/callback?code=c&state=s`);
     expect(config.cache.token).toBeNull();
-    backend.finishError = "Login failed. <b>";
-    const failed = await handle(at("/dashboard", form({ action: "finish-login", callback: "x#y" }, { cookie: await cookie() })), config);
-    expect(failed.status).toBe(400);
-    expect(await failed.text()).toContain("Login failed. &lt;b&gt;");
+  });
+
+  it("shows the store's error, escaped", async () => {
+    const { config, backend } = await setup();
+    backend.answer = Response.json({ status: "error", error: "unknown <state>" }, { status: 404 });
+    const failed = await handle(at("/anthropic/callback?code=c&state=s", { headers: { cookie: await cookie() } }), config);
+    expect(failed.status).toBe(404);
+    expect(await failed.text()).toContain("unknown &lt;state&gt;");
   });
 });
 

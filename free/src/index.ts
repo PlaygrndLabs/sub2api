@@ -11,8 +11,11 @@ export default {
     return handle(request, {
       backend: env.STORE.getByName("main"),
       dashboardPassword: env.DASHBOARD_PASSWORD ?? "",
+      // Without its own key, the dashboard password doubles as the management key.
+      managementKey: env.MANAGEMENT_KEY || env.DASHBOARD_PASSWORD || "",
       nowSeconds,
       upstream: (upstream) => fetch(upstream),
+      panel: (panelRequest) => env.ASSETS.fetch(new Request(new URL("/management.html", panelRequest.url))),
       cache,
     });
   },

@@ -8,7 +8,8 @@
   "include": [
     "test/s3-server.ts",
     "free/test/sqlite.ts",
-    "free/test/account.test.ts"
+    "free/test/account.test.ts",
+    "free/test/management.test.ts"
   ],
   "exclude": []
 }

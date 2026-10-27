@@ -5,7 +5,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "build": "node scripts/fetch-panel.mjs"
   },
   "devDependencies": {
     "wrangler": "4.149.0"
@@ -14,7 +15,13 @@
     "bindings": {
       "DASHBOARD_PASSWORD": {
         "description": "Password for the dashboard sign-in. At least 16 characters, for example `openssl rand -hex 24`."
+      },
+      "MANAGEMENT_KEY": {
+        "description": "Optional. The management key the dashboard asks for after sign-in, as on the paid install; at least 16 characters. Leave it out to use DASHBOARD_PASSWORD."
       }
     }
+  },
+  "dependencies": {
+    "yaml": "2.8.1"
   }
 }

@@ -36,7 +36,8 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "@cloudflare/containers": "0.3.7"
+    "@cloudflare/containers": "0.3.7",
+    "yaml": "2.8.1"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

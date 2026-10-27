@@ -1,5 +1,5 @@
 {
-  // sub2api for the Workers Free plan: no container, Claude subscriptions only.
+  // sub2api for the Workers Free plan: no container, CPA's dashboard and API in TypeScript.
   // Deploy with: npx wrangler deploy -c free/wrangler.jsonc
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "sub2api-free",
@@ -7,6 +7,10 @@
   "compatibility_date": "2026-10-01",
   "workers_dev": true,
   "observability": { "enabled": true },
+  // CPA's official dashboard, downloaded before each build. The Worker runs first so the page
+  // stays behind the sign-in.
+  "build": { "command": "node scripts/fetch-panel.mjs" },
+  "assets": { "directory": "public", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none" },
   "durable_objects": {
     "bindings": [{ "name": "STORE", "class_name": "Store" }]
   },

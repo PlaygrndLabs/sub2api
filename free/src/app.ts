@@ -1,13 +1,16 @@
 import { hashKey, REFRESH_MARGIN_SECONDS, type Backend } from "./account.ts";
 import type { Fetcher } from "./claude-oauth.ts";
-import { dashboardPage, loginPage, type DashboardView } from "./pages.ts";
+import { MANAGEMENT_PREFIX } from "./management.ts";
+import { loginPage, messagePage } from "./pages.ts";
 import { downstreamResponse, isProxied, methodAllowed, presentedKey, upstreamRequest } from "./proxy.ts";
 import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, sessionIsValid } from "./session.ts";
 
 export const MIN_PASSWORD_LENGTH = 16;
+export const MIN_MANAGEMENT_KEY_LENGTH = MIN_PASSWORD_LENGTH;
 const KEY_CACHE_SECONDS = 60;
 const MAX_FORM_BODY = 4096;
 const PASSWORD_NOT_SET = `Sign-in is off: set the DASHBOARD_PASSWORD secret to at least ${MIN_PASSWORD_LENGTH} characters.`;
+const OAUTH_CALLBACK_PATHS = new Set(["/callback", "/auth/callback", "/oauth-callback", "/anthropic/callback"]);
 
 // Per-isolate memory, so most API calls skip the Durable Object round trip entirely.
 export class EdgeCache {
@@ -18,8 +21,10 @@ export class EdgeCache {
 export interface AppConfig {
   readonly backend: Backend;
   readonly dashboardPassword: string;
+  readonly managementKey: string;
   readonly nowSeconds: () => number;
   readonly upstream: Fetcher;
+  readonly panel: (request: Request) => Promise<Response>;
   readonly cache: EdgeCache;
 }
 
@@ -72,7 +77,7 @@ async function api(request: Request, url: URL, config: AppConfig): Promise<Respo
   if (!methodAllowed(url.pathname, request.method)) return apiError(405, "invalid_request_error", "Method not allowed.");
   const key = presentedKey(request);
   if (key === null || !(await keyValid(key, config))) {
-    return apiError(401, "authentication_error", "Invalid API key. Create one in the gateway dashboard.");
+    return apiError(401, "authentication_error", "Invalid API key. Add one under API Keys in the gateway dashboard.");
   }
   const token = await accessToken(config);
   if (token instanceof Response) return token;
@@ -91,12 +96,6 @@ async function signedIn(request: Request, config: AppConfig): Promise<boolean> {
   return token !== null && (await sessionIsValid(config.dashboardPassword, token, config.nowSeconds()));
 }
 
-async function readForm(request: Request): Promise<FormData | null> {
-  const length = Number(request.headers.get("content-length") ?? "0");
-  if (!Number.isFinite(length) || length > MAX_FORM_BODY) return null;
-  return request.formData().catch(() => null);
-}
-
 // Browsers send Origin on every form POST, though some send "null" under a strict referrer
 // policy; Sec-Fetch-Site then still says whether the form came from this site.
 function sameOrigin(request: Request, url: URL): boolean {
@@ -109,53 +108,64 @@ async function login(request: Request, config: AppConfig): Promise<Response> {
   if (config.dashboardPassword.length < MIN_PASSWORD_LENGTH) return html(loginPage(PASSWORD_NOT_SET), 503);
   const client = request.headers.get("cf-connecting-ip") ?? "unknown";
   if (!(await config.backend.attemptAllowed(client))) return html(loginPage("Too many sign-in attempts. Wait a minute and try again."), 429);
-  const form = await readForm(request);
+  const length = Number(request.headers.get("content-length") ?? "0");
+  const form = Number.isFinite(length) && length <= MAX_FORM_BODY ? await request.formData().catch(() => null) : null;
   const password = form?.get("password");
   if (typeof password !== "string" || !(await passwordMatches(password, config.dashboardPassword))) {
     return html(loginPage("Wrong password."), 401);
   }
   const token = await issueSession(config.dashboardPassword, config.nowSeconds());
-  return redirect("/", { "set-cookie": `${SESSION_COOKIE}=${token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${SESSION_SECONDS}` });
+  return redirect("/management.html", { "set-cookie": `${SESSION_COOKIE}=${token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${SESSION_SECONDS}` });
 }
 
-async function dashboard(url: URL, config: AppConfig, extra: Partial<DashboardView> = {}, status = 200): Promise<Response> {
-  const overview = await config.backend.overview();
-  return html(dashboardPage({ overview, origin: url.origin, nowSeconds: config.nowSeconds(), ...extra }), status);
+function withoutCookies(request: Request, target?: URL): Request {
+  const headers = new Headers(request.headers);
+  headers.delete("cookie");
+  return new Request(target ?? request.url, new Request(request, { headers }));
 }
 
-async function dashboardAction(request: Request, url: URL, config: AppConfig): Promise<Response> {
-  const form = await readForm(request);
-  const field = (name: string) => {
-    const value = form?.get(name);
-    return typeof value === "string" ? value : "";
-  };
-  switch (field("action")) {
-    case "create-key":
-      return dashboard(url, config, { newKey: await config.backend.createKey(field("name")) });
-    case "revoke-key": {
-      const id = Number(field("id"));
-      if (Number.isInteger(id)) await config.backend.revokeKey(id);
-      return redirect("/");
-    }
-    case "start-login":
-      return dashboard(url, config, { loginUrl: await config.backend.startLogin() });
-    case "finish-login": {
-      const error = await config.backend.finishLogin(field("callback"));
-      config.cache.token = null;
-      return error === null ? dashboard(url, config, { message: "Claude account connected." }) : dashboard(url, config, { error }, 400);
-    }
-    case "disconnect":
-      await config.backend.disconnect();
-      config.cache.token = null;
-      return redirect("/");
-    default:
-      return dashboard(url, config, { error: "Unknown action." }, 400);
+// The dashboard sends CPA's management key with every call, on top of the sign-in cookie.
+async function managementKeyValid(request: Request, config: AppConfig): Promise<boolean> {
+  if (config.managementKey.length < MIN_MANAGEMENT_KEY_LENGTH) return false;
+  const bearer = request.headers.get("authorization")?.replace(/^bearer\s+/i, "").trim();
+  const given = bearer || request.headers.get("x-management-key")?.trim() || "";
+  return given !== "" && passwordMatches(given, config.managementKey);
+}
+
+async function management(request: Request, url: URL, config: AppConfig): Promise<Response> {
+  if (config.managementKey.length < MIN_MANAGEMENT_KEY_LENGTH) return notFound();
+  if (!(await signedIn(request, config))) return Response.json({ error: "sign in at /login first" }, { status: 401 });
+  if (!(await managementKeyValid(request, config))) return Response.json({ error: "invalid management key" }, { status: 401 });
+  // The dashboard checks a server with v0's config read before switching to v8.
+  const target = url.pathname === "/v0/management/config" ? new URL(`${MANAGEMENT_PREFIX}/config${url.search}`, url) : url;
+  const response = await config.backend.manage(withoutCookies(request, target));
+  if (request.method !== "GET" && target.pathname.startsWith(`${MANAGEMENT_PREFIX}/config`)) config.cache.keys.clear();
+  return response;
+}
+
+async function oauthCallback(request: Request, url: URL, config: AppConfig): Promise<Response> {
+  if (request.method !== "GET") return notFound();
+  if (!(await signedIn(request, config))) {
+    return html(messagePage("Sign in first", "Sign in to the dashboard, then open this address again.", true), 401);
   }
+  const target = new URL(`${MANAGEMENT_PREFIX}/oauth/callback${url.search}`, url);
+  const response = await config.backend.manage(new Request(target));
+  const body = (await response.json().catch(() => null)) as { status?: unknown; error?: unknown } | null;
+  if (response.ok && body?.status === "ok") {
+    config.cache.token = null;
+    return html(messagePage("Login received", "Go back to the dashboard to see the new login.", false));
+  }
+  const reason = typeof body?.error === "string" ? body.error : `the gateway answered ${response.status}`;
+  return html(messagePage("Login not saved", `${reason}. Start the login again from the dashboard.`, true), response.ok ? 400 : response.status);
 }
 
 export async function handle(request: Request, config: AppConfig): Promise<Response> {
   const url = new URL(request.url);
   if (isProxied(url.pathname)) return api(request, url, config);
+  if (url.pathname.startsWith(`${MANAGEMENT_PREFIX}/`) || url.pathname === MANAGEMENT_PREFIX || url.pathname === "/v0/management/config") {
+    return management(request, url, config);
+  }
+  if (OAUTH_CALLBACK_PATHS.has(url.pathname)) return oauthCallback(request, url, config);
   switch (url.pathname) {
     case "/healthz":
       return new Response("ok\n", { headers: { "content-type": "text/plain; charset=utf-8" } });
@@ -164,15 +174,14 @@ export async function handle(request: Request, config: AppConfig): Promise<Respo
       if (request.method === "GET") return html(loginPage(config.dashboardPassword.length < MIN_PASSWORD_LENGTH ? PASSWORD_NOT_SET : null));
       return notFound();
     case "/logout":
-      if (request.method !== "POST") return notFound();
+      if (request.method !== "POST" && request.method !== "GET") return notFound();
       return redirect("/login", { "set-cookie": `${SESSION_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0` });
     case "/":
       if (request.method !== "GET") return notFound();
-      return (await signedIn(request, config)) ? dashboard(url, config) : redirect("/login");
-    case "/dashboard":
-      if (request.method !== "POST" || !sameOrigin(request, url)) return notFound();
-      if (!(await signedIn(request, config))) return redirect("/login");
-      return dashboardAction(request, url, config);
+      return redirect((await signedIn(request, config)) ? "/management.html" : "/login");
+    case "/management.html":
+      if (request.method !== "GET") return notFound();
+      return (await signedIn(request, config)) ? config.panel(request) : redirect("/login");
     default:
       return notFound();
   }

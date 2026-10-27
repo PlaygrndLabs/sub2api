@@ -1,5 +1,3 @@
-import type { Overview } from "./account.ts";
-
 export function escapeHtml(text: string): string {
   return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
@@ -7,7 +5,7 @@ export function escapeHtml(text: string): string {
 export function loginPage(error: string | null): string {
   return page(`<section class="narrow">
   <h1>sub2api</h1>
-  <p class="muted">Sign in to manage your gateway.</p>
+  <p class="muted">Sign in to open the dashboard.</p>
   ${notice(error, true)}
   <form method="post" action="/login">
     <input type="password" name="password" autocomplete="current-password" placeholder="Dashboard password" required autofocus>
@@ -16,67 +14,12 @@ export function loginPage(error: string | null): string {
 </section>`);
 }
 
-export interface DashboardView {
-  readonly overview: Overview;
-  readonly origin: string;
-  readonly nowSeconds: number;
-  readonly message?: string | null;
-  readonly error?: string | null;
-  readonly newKey?: string | null;
-  readonly loginUrl?: string | null;
-}
-
-export function dashboardPage(view: DashboardView): string {
-  const { account, keys } = view.overview;
-  const accountBlock =
-    account === null
-      ? `<p>No Claude account connected yet.</p>`
-      : `<p>Connected as <strong>${escapeHtml(account.email || "your Claude account")}</strong>. The access token renews itself; this one is good for ${minutesLeft(account.expiresAt, view.nowSeconds)}.</p>
-  <form method="post" action="/dashboard"><input type="hidden" name="action" value="disconnect"><button class="secondary" type="submit">Disconnect</button></form>`;
-  const loginBlock =
-    view.loginUrl == null
-      ? `<form method="post" action="/dashboard"><input type="hidden" name="action" value="start-login"><button type="submit">${account === null ? "Connect Claude" : "Connect again"}</button></form>`
-      : `<ol>
-    <li><a href="${escapeHtml(view.loginUrl)}" target="_blank" rel="noopener noreferrer">Open Claude's sign-in page</a> and approve.</li>
-    <li>You land on a <code>localhost</code> page that doesn't load. That's expected. Copy its whole address.</li>
-    <li>Paste it here within 15 minutes.</li>
-  </ol>
-  <form method="post" action="/dashboard"><input type="hidden" name="action" value="finish-login">
-    <input name="callback" placeholder="http://localhost:54545/callback?code=..." required autocomplete="off">
-    <button type="submit">Save login</button>
-  </form>`;
-  const rows = keys
-    .map(
-      (key) => `<tr><td>${escapeHtml(key.name)}</td><td><code>…${escapeHtml(key.hint)}</code></td><td>${new Date(key.createdAt * 1000).toISOString().slice(0, 10)}</td>
-      <td><form method="post" action="/dashboard"><input type="hidden" name="action" value="revoke-key"><input type="hidden" name="id" value="${key.id}"><button class="secondary" type="submit">Revoke</button></form></td></tr>`,
-    )
-    .join("");
-  const newKey =
-    view.newKey == null
-      ? ""
-      : `<div class="notice">Copy this key now. It won't be shown again.<pre>${escapeHtml(view.newKey)}</pre></div>`;
-  return page(`<section>
-  <header><h1>sub2api</h1><form method="post" action="/logout"><button class="secondary" type="submit">Sign out</button></form></header>
-  ${notice(view.message ?? null, false)}${notice(view.error ?? null, true)}
-  <h2>Claude account</h2>
-  ${accountBlock}
-  ${loginBlock}
-  <h2>API keys</h2>
-  ${newKey}
-  ${keys.length === 0 ? "<p>No keys yet. API calls are refused until you create one.</p>" : `<table><thead><tr><th>Name</th><th>Key</th><th>Created</th><th></th></tr></thead><tbody>${rows}</tbody></table>`}
-  <form method="post" action="/dashboard" class="inline"><input type="hidden" name="action" value="create-key">
-    <input name="name" placeholder="Key name, e.g. laptop" maxlength="60" autocomplete="off"><button type="submit">Create key</button>
-  </form>
-  <h2>Use it</h2>
-  <pre>export ANTHROPIC_BASE_URL=${escapeHtml(view.origin)}
-export ANTHROPIC_API_KEY=&lt;your gateway API key&gt;</pre>
-  <p class="muted">A revoked key can keep working for up to a minute.</p>
+export function messagePage(title: string, text: string, failed: boolean): string {
+  return page(`<section class="narrow">
+  <h1>${escapeHtml(title)}</h1>
+  ${notice(text, failed)}
+  <form method="get" action="/management.html"><button type="submit">Open the dashboard</button></form>
 </section>`);
-}
-
-function minutesLeft(expiresAt: number, nowSeconds: number): string {
-  const minutes = Math.max(0, Math.round((expiresAt - nowSeconds) / 60));
-  return minutes >= 120 ? `${Math.round(minutes / 60)} more hours` : `${minutes} more minutes`;
 }
 
 function notice(text: string | null, error: boolean): string {

@@ -10,7 +10,7 @@ Two ways to install:
 | | Plan | What runs | Deploy |
 |---|---|---|---|
 | **Full** | Workers Paid ($5/month) | The latest CPA release in a container, with its official dashboard | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api) |
-| **Free** | Workers Free | Our container-free TypeScript gateway (Claude subscriptions today, more CPA features coming) | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free) |
+| **Free** | Workers Free | Our container-free TypeScript gateway with CPA's own dashboard (Claude subscriptions today, more CPA features coming) | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free) |
 
 ## Why
 
