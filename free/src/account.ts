@@ -2,7 +2,8 @@ import { OAuthError, authorizeUrl, exchangeCode, parseCallback, randomToken, ref
 import * as codex from "./codex-oauth.ts";
 import { Config } from "./config.ts";
 import { CatalogCache } from "./models.ts";
-import { upstreamCredentials, type RoutingTable, type UpstreamCredential } from "./providers.ts";
+import { flagOf, retryOf, upstreamCredentials, weightOf, type LoginEntry, type RoutingTable, type UpstreamCredential } from "./providers.ts";
+import { routingSettings, type CooldownEvent, type RoutingSettings } from "./routing.ts";
 import { storedKey, type UsageRecord } from "./usage.ts";
 import * as kimi from "./kimi-oauth.ts";
 import { claudeCredential, claudeFileData, type CredentialFile, type LoginSession, type Vault } from "./vault.ts";
@@ -30,14 +31,16 @@ const PROVIDER_OF_FILE: Record<string, LoginProvider> = { "kimi-ai": "kimi" };
 // state below (config, token refreshes, login sessions) is never raced by another copy.
 export interface Backend {
   keyValid(hash: string): Promise<boolean>;
-  token(): Promise<TokenResult>;
-  codexToken(): Promise<TokenResult>;
+  // A login's token by its file name, or, with no name, the next login's in turn.
+  token(name?: string): Promise<TokenResult>;
+  codexToken(name?: string): Promise<TokenResult>;
   loginToken(provider: ServedLogin): Promise<TokenResult>;
   invalidate(accessToken: string): Promise<void>;
   attemptAllowed(client: string): Promise<boolean>;
   manage(request: Request): Promise<Response>;
   routing(): Promise<RoutingTable>;
   record(records: UsageRecord[]): Promise<void>;
+  cool(events: CooldownEvent[]): Promise<void>;
 }
 
 // A Kimi device login waiting for approval, kept in its session row.
@@ -59,6 +62,29 @@ interface Login {
   readonly accountId: string;
   readonly endpoint?: string;
   readonly headers?: Record<string, string>;
+}
+
+function textOf(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function numberOf(value: unknown): number {
+  const parsed = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : 0;
+}
+
+// CPA reads a login's routing fields from the top level of its auth file.
+function loginEntry(file: CredentialFile): LoginEntry {
+  const data = file.data;
+  return {
+    name: file.name,
+    provider: file.provider === "codex" ? "codex" : "claude",
+    priority: numberOf(data.priority),
+    weight: weightOf(data.weight),
+    prefix: textOf(data.prefix),
+    disableCooling: flagOf(data.disable_cooling ?? data["disable-cooling"]),
+    requestRetry: retryOf(data.request_retry ?? data["request-retry"]),
+  };
 }
 
 function loginOf(file: CredentialFile): Login | null {
@@ -83,6 +109,7 @@ export async function hashKey(key: string): Promise<string> {
 export class Account {
   private config: Config | null = null;
   private upstreams: UpstreamCredential[] | null = null;
+  private settings: RoutingSettings | null = null;
   private keyHashes: Set<string> | null = null;
   private readonly refreshing = new Map<string, Promise<TokenResult>>();
   private readonly lastForcedRefresh = new Map<string, number>();
@@ -107,15 +134,46 @@ export class Account {
     this.config = config;
     this.keyHashes = null;
     this.upstreams = null;
+    this.settings = null;
+    // API-key ids follow their place in the config, so their cooldowns don't outlive an edit.
+    this.vault.clearCooldowns("keys");
   }
 
-  // What the Worker needs to pick an upstream for a request: the configured API-key providers
-  // and which logins are on.
+  // What the Worker needs to pick an upstream for a request: the configured API-key providers,
+  // the enabled logins (and the ChatGPT plans, which decide the models they list), the routing settings and the cooldowns every isolate has reported.
   async routing(): Promise<RoutingTable> {
-    this.upstreams ??= upstreamCredentials(this.currentConfig().read([]));
-    const codexFiles = this.loginFiles("codex");
-    const codexPlans = codexFiles.map((file) => (typeof file.data.plan_type === "string" ? file.data.plan_type : ""));
-    return { credentials: this.upstreams, claudeOAuth: this.loginFiles("claude").length > 0, codexOAuth: codexFiles.length > 0, codexPlans, vertexOAuth: this.loginFiles("vertex").length > 0, kimiOAuth: this.loginFiles("kimi").length > 0 };
+    const tree = this.currentConfig().read([]);
+    this.upstreams ??= upstreamCredentials(tree);
+    this.settings ??= routingSettings(tree);
+    // Claude and ChatGPT logins are routed one by one; Kimi and Vertex still take turns in the Durable Object.
+    const files = (["claude", "codex"] as const).flatMap((provider) => this.loginFiles(provider));
+    const logins = files.map(loginEntry);
+    const codexPlans = files.filter((file) => file.provider === "codex").map((file) => (typeof file.data.plan_type === "string" ? file.data.plan_type : ""));
+    return {
+      credentials: this.upstreams,
+      claudeOAuth: logins.some((login) => login.provider === "claude"),
+      codexOAuth: logins.some((login) => login.provider === "codex"),
+      codexPlans,
+      vertexOAuth: this.loginFiles("vertex").length > 0,
+      kimiOAuth: this.loginFiles("kimi").length > 0,
+      logins,
+      settings: this.settings,
+      cooldowns: this.vault.cooldowns(this.nowSeconds()),
+    };
+  }
+
+  // Cooldowns and successes reported by the Worker's isolates.
+  async cool(events: CooldownEvent[]): Promise<void> {
+    for (const event of events.slice(0, 200)) {
+      if (typeof event?.id !== "string" || event.id === "" || event.id.length > 512) continue;
+      if ("clear" in event) {
+        this.vault.clearCooldowns(event.id);
+        continue;
+      }
+      const until = Math.min(Number(event.until), this.nowSeconds() + 24 * 60 * 60);
+      if (typeof event.model !== "string" || event.model.length > 256 || !Number.isFinite(until)) continue;
+      this.vault.saveCooldown({ id: event.id, model: event.model, until, reason: String(event.reason).slice(0, 64), status: Number(event.status) || 0, level: Math.max(0, Math.min(32, Number(event.level) || 0)) });
+    }
   }
 
   async keyValid(hash: string): Promise<boolean> {
@@ -134,18 +192,24 @@ export class Account {
     return this.loginFiles("claude");
   }
 
-  token(): Promise<TokenResult> {
-    return this.loginToken("claude");
+  token(name?: string): Promise<TokenResult> {
+    return this.loginToken("claude", name);
   }
 
-  codexToken(): Promise<TokenResult> {
-    return this.loginToken("codex");
+  codexToken(name?: string): Promise<TokenResult> {
+    return this.loginToken("codex", name);
   }
 
-  // Picks the provider's next enabled login in turn (round-robin), refreshing it when near expiry.
-  async loginToken(provider: LoginProvider): Promise<TokenResult> {
+  // The named login's token, or the provider's next enabled login in turn (round-robin),
+  // refreshed when near expiry.
+  async loginToken(provider: LoginProvider, name?: string): Promise<TokenResult> {
     const files = this.loginFiles(provider);
     if (files.length === 0) return { ok: false, status: 503, message: `No ${LABEL[provider]} account is connected yet: add one under OAuth login in the dashboard.` };
+    if (name !== undefined) {
+      const file = files.find((candidate) => candidate.name === name);
+      if (file === undefined) return { ok: false, status: 503, message: `That ${LABEL[provider]} login is disabled or was removed.` };
+      return this.tokenFor(file);
+    }
     const turn = this.next.get(provider) ?? 0;
     this.next.set(provider, turn + 1);
     return this.tokenFor(files[turn % files.length] as CredentialFile);

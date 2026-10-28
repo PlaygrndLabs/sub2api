@@ -1,5 +1,6 @@
 import type { Credential } from "./claude-oauth.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
+import type { Cooldown } from "./routing.ts";
 import { UsageStore } from "./usage.ts";
 
 // The slice of Durable Object SQLite storage this file uses, so tests can back it with node:sqlite.
@@ -37,6 +38,9 @@ export interface KeyRow {
 }
 
 const SESSION_SECONDS = 15 * 60;
+// An ended cooldown is kept this long for its quota backoff step, unless the credential succeeds.
+const COOLDOWN_KEPT_SECONDS = 24 * 60 * 60;
+const COOLDOWN_LIMIT = 2000;
 const ATTEMPT_WINDOW = 60;
 const ATTEMPT_LIMIT = 5;
 
@@ -58,6 +62,9 @@ export class Vault {
     sql.exec(`CREATE TABLE IF NOT EXISTS oauth_sessions (
       state TEXT PRIMARY KEY, provider TEXT NOT NULL, verifier TEXT NOT NULL, created_at INTEGER NOT NULL,
       status TEXT NOT NULL DEFAULT 'wait', error TEXT NOT NULL DEFAULT '')`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS cooldowns (
+      id TEXT NOT NULL, model TEXT NOT NULL, until INTEGER NOT NULL, reason TEXT NOT NULL, status INTEGER NOT NULL,
+      level INTEGER NOT NULL, PRIMARY KEY (id, model))`);
     this.usage = new UsageStore(sql);
     this.migrateSingleLogin();
   }
@@ -191,6 +198,38 @@ export class Vault {
     const found = this.sql.exec("SELECT 1 FROM oauth_sessions WHERE state = ?", state).toArray().length > 0;
     this.sql.exec("DELETE FROM oauth_sessions WHERE state = ?", state);
     return found;
+  }
+
+  cooldowns(nowSeconds: number): Cooldown[] {
+    this.sql.exec("DELETE FROM cooldowns WHERE until < ?", nowSeconds - COOLDOWN_KEPT_SECONDS);
+    return this.sql
+      .exec("SELECT id, model, until, reason, status, level FROM cooldowns ORDER BY until DESC LIMIT ?", COOLDOWN_LIMIT)
+      .toArray()
+      .map((row) => ({ id: String(row.id), model: String(row.model), until: Number(row.until), reason: String(row.reason), status: Number(row.status), level: Number(row.level) }));
+  }
+
+  // A later report never shortens a cooldown another isolate set.
+  saveCooldown(cooldown: Cooldown): void {
+    this.sql.exec(
+      `INSERT INTO cooldowns (id, model, until, reason, status, level) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id, model) DO UPDATE SET until = max(until, excluded.until), reason = excluded.reason, status = excluded.status,
+       level = max(level, excluded.level)`,
+      cooldown.id,
+      cooldown.model,
+      cooldown.until,
+      cooldown.reason,
+      cooldown.status,
+      cooldown.level,
+    );
+  }
+
+  // Removes a credential's cooldowns, or every API key's (ids not starting "file:") with "keys".
+  clearCooldowns(id: string | "keys"): string[] {
+    const where = id === "keys" ? "id NOT LIKE 'file:%'" : "id = ?";
+    const bindings = id === "keys" ? [] : [id];
+    const models = this.sql.exec(`SELECT model FROM cooldowns WHERE ${where}`, ...bindings).toArray().map((row) => String(row.model));
+    this.sql.exec(`DELETE FROM cooldowns WHERE ${where}`, ...bindings);
+    return models;
   }
 
   // Sign-in throttle: at most ATTEMPT_LIMIT tries per client per minute.
