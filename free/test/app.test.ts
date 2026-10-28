@@ -662,6 +662,39 @@ describe("Claude Code on ChatGPT logins and Codex keys", () => {
     expect(seen[2]?.url).not.toContain("generativelanguage");
   });
 
+  it("serves an OpenAI Chat client from a Claude API key, and explains that logins can't", async () => {
+    const claude = () =>
+      new Response(
+        [
+          { type: "message_start", message: { id: "msg_1", usage: { input_tokens: 4 } } },
+          { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hi" } },
+          { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+          { type: "message_stop" },
+        ]
+          .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+          .join(""),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    const { config, seen, backend } = await providersSetup(async () => claude());
+    const response = await handle(post("/v1/chat/completions", { model: "work/claude-sonnet-5-5", stream: true, messages: [{ role: "user", content: "hi" }] }, { "x-session": "s-1" }), config);
+    const text = await response.text();
+    expect(text).toContain('"delta":{"content":"Hi"}');
+    expect(text).toContain('"finish_reason":"stop"');
+    expect(text.endsWith("data: [DONE]\n\n")).toBe(true);
+    const [sent] = seen;
+    expect(sent?.url).toBe("https://api.anthropic.com/v1/messages");
+    expect(sent?.headers.get("x-api-key")).toBe("sk-ant-1");
+    expect(sent?.headers.get("authorization")).toBeNull();
+    expect(sent?.headers.get("anthropic-version")).toBe("2023-06-01");
+    expect(await sent?.json()).toEqual({ model: "claude-sonnet-5-5", max_tokens: 32000, stream: true, messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] });
+    backend.table = { credentials: [], claudeOAuth: true, codexOAuth: false };
+    config.cache.forgetConfig();
+    const login = await handle(post("/v1/chat/completions", { model: "claude-sonnet-5-5", messages: [] }), config);
+    expect(login.status).toBe(400);
+    expect(await login.json()).toMatchObject({ error: { message: expect.stringMatching(/Claude logins serve Claude Code only/) } });
+    expect(seen).toHaveLength(1);
+  });
+
   it("translates a 600 KB Claude Code request within the CPU budget", async () => {
     const history = Array.from({ length: 400 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: [{ type: "text", text: "x".repeat(1500) }] }));
     const tools = Array.from({ length: 30 }, (_, index) => ({ name: `tool_${index}`, description: "d".repeat(300), input_schema: { type: "object", properties: { a: { type: "string" } } } }));
