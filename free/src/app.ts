@@ -8,7 +8,7 @@ import { responsesResponse, ResponsesStream, responsesToClaude } from "./respons
 import { MANAGEMENT_PREFIX } from "./management.ts";
 import { availableModels, CatalogCache, claudeModelList, geminiModel, geminiModelList, openaiModelList } from "./models.ts";
 import { loginPage, messagePage } from "./pages.ts";
-import { candidates, inDefaultFamily, NATIVE_FORMAT, ordered, type Candidate, type Format, type RoutingTable } from "./providers.ts";
+import { candidates, inDefaultFamily, NATIVE_FORMAT, ordered, takesNatively, type Candidate, type Format, type RoutingTable } from "./providers.ts";
 import { CODEX_UPSTREAM, codexRequest, downstreamResponse, formatError, presentedKey, providerRequest, routeOf, upstreamRequest, UPSTREAM, type Route } from "./proxy.ts";
 import { apiKeyKey, loginKey, requestLine, type Attempt, type UsageRecord } from "./usage.ts";
 import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "./session.ts";
@@ -204,7 +204,7 @@ async function viaCodexLogin(request: Request, url: URL, config: AppConfig, text
 // Formats a provider takes with translation: Claude, OpenAI Chat and Responses clients reach
 // every provider through Anthropic Messages.
 function servable(format: Format, kind: Candidate["credential"]["kind"]): boolean {
-  return NATIVE_FORMAT[kind] === format || format !== "gemini";
+  return takesNatively(kind, format) || format !== "gemini";
 }
 
 function parsedObject(text: string): Record<string, unknown> | null {
@@ -411,7 +411,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   for (const [index, candidate] of attempts.entries()) {
     const isLast = index === attempts.length - 1;
     const body = parsed === null || candidate.model === model ? text : parsed.withModel(candidate.model);
-    const translated = route.format !== NATIVE_FORMAT[candidate.credential.kind];
+    const translated = !takesNatively(candidate.credential.kind, route.format);
     if (translated || candidate.credential.id === CLAUDE_LOGIN_ID || candidate.credential.id === CODEX_LOGIN_ID) {
       let response: Response;
       if (translated && route.format !== "claude") response = await viaClaudeMessages(request, url, route, config, candidate, text);
