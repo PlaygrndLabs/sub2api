@@ -6,7 +6,7 @@ import { claudeEventStream, claudeMessage, ClaudeStream, claudeToResponses } fro
 import { chatCompletion, ChatStream, chatToClaude } from "./openai-claude.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
 import { loginPage, messagePage } from "./pages.ts";
-import { candidates, inDefaultFamily, listedModels, NATIVE_FORMAT, ordered, type Candidate, type Format, type RoutingTable } from "./providers.ts";
+import { candidates, inDefaultFamily, listedModels, NATIVE_FORMAT, ordered, takesNatively, type Candidate, type Format, type RoutingTable } from "./providers.ts";
 import { CODEX_UPSTREAM, codexRequest, downstreamResponse, formatError, presentedKey, providerRequest, routeOf, upstreamRequest, UPSTREAM, type Route } from "./proxy.ts";
 import { apiKeyKey, loginKey, requestLine, type Attempt, type UsageRecord } from "./usage.ts";
 import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "./session.ts";
@@ -202,7 +202,7 @@ async function viaCodexLogin(request: Request, url: URL, config: AppConfig, text
 // Gemini upstreams, and OpenAI Chat clients can reach Claude API keys.
 function servable(format: Format, kind: Candidate["credential"]["kind"]): boolean {
   const native = NATIVE_FORMAT[kind];
-  if (native === format) return true;
+  if (takesNatively(kind, format)) return true;
   if (format === "claude") return native === "openai-response" || native === "openai" || native === "gemini";
   return format === "openai" && native === "claude";
 }
@@ -398,7 +398,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   for (const [index, candidate] of attempts.entries()) {
     const isLast = index === attempts.length - 1;
     const body = parsed === null || candidate.model === model ? text : parsed.withModel(candidate.model);
-    const translated = route.format !== NATIVE_FORMAT[candidate.credential.kind];
+    const translated = !takesNatively(candidate.credential.kind, route.format);
     if (translated || candidate.credential.id === CLAUDE_LOGIN_ID || candidate.credential.id === CODEX_LOGIN_ID) {
       let response: Response;
       if (translated && route.format === "openai") response = await viaClaudeKey(request, config, candidate, text);

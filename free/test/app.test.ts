@@ -326,6 +326,37 @@ describe("API-key providers", () => {
   });
 });
 
+describe("xAI keys", () => {
+  const XAI = { "api-keys": { xai: [{ name: "grok", keys: [{ "api-key": "xai-key-1" }] }] } };
+
+  async function xaiSetup() {
+    const fixture = await setup();
+    fixture.backend.table = { credentials: upstreamCredentials(XAI), claudeOAuth: true, codexOAuth: false };
+    return fixture;
+  }
+
+  it("defaults to xAI's API and serves Grok models", () => {
+    expect(upstreamCredentials(XAI).map((credential) => [credential.id, credential.baseUrl])).toEqual([["xai/grok/0", "https://api.x.ai/v1"]]);
+  });
+
+  it("sends Responses and Chat requests untranslated, each to its own endpoint", async () => {
+    const { config, seen } = await xaiSetup();
+    await handle(post("/v1/responses", { model: "grok-4.5", input: "hi" }), config);
+    await handle(post("/v1/chat/completions", { model: "grok-4.5", messages: [{ role: "user", content: "hi" }] }), config);
+    expect(seen.map((request) => request.url)).toEqual(["https://api.x.ai/v1/responses", "https://api.x.ai/v1/chat/completions"]);
+    expect(seen.map((request) => request.headers.get("authorization"))).toEqual(["Bearer xai-key-1", "Bearer xai-key-1"]);
+    expect(await seen[1]?.json()).toEqual({ model: "grok-4.5", messages: [{ role: "user", content: "hi" }] });
+  });
+
+  it("translates Claude Code requests to Responses", async () => {
+    const { config, seen } = await xaiSetup();
+    await handle(post("/v1/messages", { model: "grok-4.5", stream: true, max_tokens: 100, messages: [{ role: "user", content: "hi" }] }, { "anthropic-version": "2023-06-01" }), config);
+    expect(seen[0]?.url).toBe("https://api.x.ai/v1/responses");
+    expect(seen[0]?.headers.get("anthropic-version")).toBeNull();
+    expect(await seen[0]?.json()).toMatchObject({ model: "grok-4.5", stream: true, input: [{ role: "user" }] });
+  });
+});
+
 describe("dashboard", () => {
   it("sends visitors to sign in, then signs them in", async () => {
     const { config } = await setup();

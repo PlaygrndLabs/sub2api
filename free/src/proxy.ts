@@ -122,6 +122,10 @@ export function providerRequest(request: Request, url: URL, route: Route, creden
       headers.set("authorization", `Bearer ${credential.apiKey}`);
       target = `${credential.baseUrl}/responses`;
       break;
+    case "xai":
+      headers.set("authorization", `Bearer ${credential.apiKey}`);
+      target = `${credential.baseUrl}/${route.format === "openai" ? "chat/completions" : "responses"}`;
+      break;
     case "openai-compatibility":
       headers.set("authorization", `Bearer ${credential.apiKey}`);
       target = `${credential.baseUrl}/chat/completions`;
