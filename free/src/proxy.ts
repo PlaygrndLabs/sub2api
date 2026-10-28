@@ -145,6 +145,14 @@ export function providerRequest(request: Request, url: URL, route: Route, creden
       if (credential.apiKey !== "") headers.set("x-goog-api-key", credential.apiKey);
       target = `${vertexModels(credential.baseUrl)}/${encodeURIComponent(model)}:${route.geminiAction ?? "generateContent"}${forwardedSearch(url)}`;
       break;
+    case "kimi": {
+      // The login's token and Kimi's identity headers come as configured headers.
+      if (route.format === "claude" && !headers.has("anthropic-version")) headers.set("anthropic-version", "2023-06-01");
+      if (route.format === "claude" && request.headers.has("anthropic-beta")) headers.set("anthropic-beta", request.headers.get("anthropic-beta") ?? "");
+      const path = route.format === "claude" ? url.pathname : route.format === "openai" ? "/v1/chat/completions" : "/v1/responses";
+      target = `${credential.baseUrl}${path}`;
+      break;
+    }
     case "codex":
       headers.set("authorization", `Bearer ${credential.apiKey}`);
       target = `${credential.baseUrl}/responses`;

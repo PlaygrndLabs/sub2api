@@ -4,6 +4,7 @@ import { claudeToGemini, geminiClaudeMessage, GeminiClaudeStream } from "./claud
 import { chatClaudeMessage, ChatClaudeStream, claudeToChat } from "./claude-openai.ts";
 import { claudeEventStream, claudeMessage, ClaudeStream, claudeToResponses } from "./claude-responses.ts";
 import { chatCompletion, ChatStream, chatToClaude } from "./openai-claude.ts";
+import { kimiUpstreamModel } from "./kimi-oauth.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
 import { availableModels, CatalogCache, claudeModelList, geminiModel, geminiModelList, openaiModelList } from "./models.ts";
 import { loginPage, messagePage } from "./pages.ts";
@@ -32,7 +33,7 @@ export class EdgeCache {
   readonly keys = new Map<string, number>();
   token: { value: string; name: string; expiresAt: number; cachedUntil: number } | null = null;
   codexToken: { value: string; name: string; accountId: string; expiresAt: number; cachedUntil: number } | null = null;
-  readonly logins = new Map<ServedLogin, { value: string; name: string; endpoint: string; expiresAt: number; cachedUntil: number }>();
+  readonly logins = new Map<ServedLogin, { value: string; name: string; endpoint: string; headers: Record<string, string>; expiresAt: number; cachedUntil: number }>();
   routing: { table: RoutingTable; until: number } | null = null;
   readonly catalog = new CatalogCache();
   turn = 0;
@@ -141,15 +142,22 @@ async function codexAccess(config: AppConfig): Promise<{ token: string; accountI
 }
 
 // A login's token and where its requests go, kept fresh by the Durable Object.
-async function loginAccess(config: AppConfig, provider: ServedLogin): Promise<{ token: string; endpoint: string } | { status: number; message: string }> {
+interface LoginAccess {
+  readonly token: string;
+  readonly endpoint: string;
+  readonly headers: Record<string, string>;
+}
+
+async function loginAccess(config: AppConfig, provider: ServedLogin): Promise<LoginAccess | { status: number; message: string }> {
   const cached = config.cache.logins.get(provider);
   const now = config.nowSeconds();
-  if (cached !== undefined && cached.cachedUntil > now && cached.expiresAt - now > REFRESH_MARGIN_SECONDS) return { token: cached.value, endpoint: cached.endpoint };
+  if (cached !== undefined && cached.cachedUntil > now && cached.expiresAt - now > REFRESH_MARGIN_SECONDS) return { token: cached.value, endpoint: cached.endpoint, headers: cached.headers };
   const result = await config.backend.loginToken(provider);
   if (!result.ok) return { status: result.status, message: result.message };
   const endpoint = result.endpoint ?? "";
-  config.cache.logins.set(provider, { value: result.accessToken, name: result.name ?? "", endpoint, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS });
-  return { token: result.accessToken, endpoint };
+  const headers = result.headers ?? {};
+  config.cache.logins.set(provider, { value: result.accessToken, name: result.name ?? "", endpoint, headers, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS });
+  return { token: result.accessToken, endpoint, headers };
 }
 
 // Fields the ChatGPT Codex endpoint refuses, which other Responses clients may send (as CPA strips).
@@ -320,7 +328,10 @@ const MAX_ATTEMPTS = 3;
 const CLAUDE_LOGIN_ID = "claude-login";
 const CODEX_LOGIN_ID = "codex-login";
 // Logins served like an API key of their provider, once their endpoint and token are known.
-const SERVED_LOGIN_IDS = new Map<string, ServedLogin>([["vertex-login", "vertex"]]);
+const SERVED_LOGIN_IDS = new Map<string, ServedLogin>([
+  ["kimi-login", "kimi"],
+  ["vertex-login", "vertex"],
+]);
 
 function loginCandidate(kind: "claude" | "codex" | ServedLogin, model: string): Candidate {
   const id = kind === "claude" ? CLAUDE_LOGIN_ID : kind === "codex" ? CODEX_LOGIN_ID : `${kind}-login`;
@@ -331,7 +342,7 @@ function loginCandidate(kind: "claude" | "codex" | ServedLogin, model: string): 
 async function servedLogin(config: AppConfig, candidate: Candidate, provider: ServedLogin): Promise<{ candidate: Candidate; token: string } | { status: number; message: string }> {
   const access = await loginAccess(config, provider);
   if (!("token" in access)) return access;
-  return { token: access.token, candidate: { ...candidate, credential: { ...candidate.credential, baseUrl: access.endpoint, headers: { authorization: `Bearer ${access.token}` } } } };
+  return { token: access.token, candidate: { ...candidate, credential: { ...candidate.credential, baseUrl: access.endpoint, headers: { ...access.headers, authorization: `Bearer ${access.token}` } } } };
 }
 
 // Most clients put "model" first. Then it is read and replaced in place, without parsing the
@@ -387,7 +398,7 @@ function noteAttempt(trace: Trace, config: AppConfig, candidate: Candidate, stat
 async function proxied(request: Request, url: URL, route: Route & { format: Format }, config: AppConfig, trace: Trace): Promise<Response> {
   const table = await routingTable(config);
   // Claude clients with only Claude logins configured: stream the body through unread.
-  if (route.format === "claude" && !table.codexOAuth && !table.vertexOAuth && !table.credentials.some((credential) => servable("claude", credential.kind))) {
+  if (route.format === "claude" && !table.codexOAuth && !table.vertexOAuth && !table.kimiOAuth && !table.credentials.some((credential) => servable("claude", credential.kind))) {
     const response = await viaClaudeLogin(request, url, config);
     noteAttempt(trace, config, loginCandidate("claude", ""), response.status);
     return response;
@@ -408,6 +419,8 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   if (route.format === "claude" && table.codexOAuth && inDefaultFamily("codex", model)) usable.push(loginCandidate("codex", model));
   // Vertex service accounts take Gemini models, from Gemini clients and translated Claude ones.
   if ((route.format === "gemini" || route.format === "claude") && table.vertexOAuth === true && inDefaultFamily("vertex", model)) usable.push(loginCandidate("vertex", model));
+  // Kimi logins take Kimi's models in Anthropic and both OpenAI formats, untranslated.
+  if (route.format !== "gemini" && table.kimiOAuth === true && inDefaultFamily("kimi", model)) usable.push(loginCandidate("kimi", kimiUpstreamModel(model)));
   if (usable.length === 0) {
     if (route.format === "claude" && table.claudeOAuth) {
       const response = await viaClaudeLogin(request, url, config, text);
