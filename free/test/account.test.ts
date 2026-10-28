@@ -105,7 +105,7 @@ describe("access token", () => {
     saveLogin(vault, "claude-a.json", "at-a", NOW + 3600);
     saveLogin(vault, "claude-b.json", "at-b", NOW + 3600);
     vault.setCredentialStatus("claude-b.json", true, "", NOW);
-    expect(await account.token()).toEqual({ ok: true, accessToken: "at-a", expiresAt: NOW + 3600 });
+    expect(await account.token()).toEqual({ ok: true, accessToken: "at-a", expiresAt: NOW + 3600, name: "claude-a.json" });
     expect(await account.token()).toMatchObject({ accessToken: "at-a" });
     expect(bodies).toHaveLength(0);
   });

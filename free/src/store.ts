@@ -3,6 +3,7 @@ import { Account, type Backend, type TokenResult } from "./account.ts";
 import type { Env } from "./env.ts";
 import { handleManagement } from "./management.ts";
 import type { RoutingTable } from "./providers.ts";
+import type { UsageRecord } from "./usage.ts";
 import { Vault } from "./vault.ts";
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -37,5 +38,8 @@ export class Store extends DurableObject<Env> implements Backend {
   }
   routing(): Promise<RoutingTable> {
     return this.account.routing();
+  }
+  record(records: UsageRecord[]): Promise<void> {
+    return this.account.record(records);
   }
 }

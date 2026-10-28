@@ -1,5 +1,6 @@
 import { LOGIN_PROVIDERS, type Account, type LoginProvider } from "./account.ts";
 import { Config, ConfigError, configTag, ifMatchSatisfied } from "./config.ts";
+import { apiKeyKey, apiKeyProvider, loginKey, storedKey, type UsageStats } from "./usage.ts";
 import type { CredentialFile } from "./vault.ts";
 
 // CPA's v8 management API (the subset the official dashboard uses), answered from the Durable
@@ -67,7 +68,7 @@ function iso(seconds: number): string {
   return new Date(seconds * 1000).toISOString();
 }
 
-function credentialEntry(file: CredentialFile, nowSeconds: number): Record<string, unknown> {
+function credentialEntry(file: CredentialFile, nowSeconds: number, usage: UsageStats): Record<string, unknown> {
   const expires = typeof file.data.expired === "string" ? Date.parse(file.data.expired) / 1000 : Number.NaN;
   const expired = Number.isFinite(expires) && expires <= nowSeconds && file.statusMessage === "token expired";
   const entry: Record<string, unknown> = {
@@ -85,9 +86,9 @@ function credentialEntry(file: CredentialFile, nowSeconds: number): Record<strin
     source: "file",
     path: file.name,
     size: JSON.stringify(file.data).length,
-    success: 0,
-    failed: 0,
-    recent_requests: [],
+    success: usage.success,
+    failed: usage.failed,
+    recent_requests: usage.recent_requests,
     quota: null,
     cooldowns: null,
     created_at: iso(file.createdAt),
@@ -104,7 +105,7 @@ function listCredentials(url: URL, account: Account): Response {
   const name = url.searchParams.get("name")?.trim() ?? "";
   const files = account.vault.credentialFiles().filter((file) => name === "" || file.name === name);
   const now = account.nowSeconds();
-  const entries = files.map((file) => credentialEntry(file, now));
+  const entries = files.map((file) => credentialEntry(file, now, account.vault.usage.stats(loginKey(file.name), now)));
   const observedAt = new Date().toISOString();
   if (!url.searchParams.has("page") && !url.searchParams.has("page_size")) return json({ observed_at: observedAt, files: entries });
   const page = Math.max(1, Number(url.searchParams.get("page") ?? "1") || 1);
@@ -118,6 +119,35 @@ function listCredentials(url: URL, account: Account): Response {
     page_size: pageSize,
     has_more: start + pageSize < entries.length,
   });
+}
+
+// CPA's API-key usage: per provider, keyed "base url|api key", for the keys configured now.
+async function apiKeyUsage(account: Account): Promise<Response> {
+  const now = account.nowSeconds();
+  const out: Record<string, Record<string, UsageStats>> = {};
+  for (const credential of (await account.routing()).credentials) {
+    const provider = apiKeyProvider(credential);
+    const key = `${credential.baseUrl}|${credential.apiKey}`;
+    out[provider] ??= {};
+    const group = out[provider];
+    if (Object.hasOwn(group, key)) continue;
+    group[key] = account.vault.usage.stats(await storedKey(apiKeyKey(credential)), now);
+  }
+  return json(out);
+}
+
+// The request log, read like CPA's log file: a tail, lines after a time, or after a cursor.
+function logs(url: URL, account: Account): Response {
+  if (!account.loggingEnabled()) return failure(400, "logging to file disabled");
+  const limitText = url.searchParams.get("limit")?.trim() ?? "";
+  const limit = limitText === "" ? 0 : Number(limitText);
+  if (!Number.isSafeInteger(limit) || limit < 0 || (limitText !== "" && limit === 0)) return failure(400, "invalid limit: must be a positive integer");
+  const afterText = url.searchParams.get("after")?.trim() ?? "";
+  const after = /^\d+$/.test(afterText) ? Number(afterText) : 0;
+  const result = account.vault.usage.lines({ cursor: url.searchParams.get("cursor")?.trim() ?? "", after, limit });
+  const body: Record<string, unknown> = { lines: result.lines, "line-count": result.lines.length, "latest-timestamp": result.latest, "next-cursor": result.nextCursor };
+  if (result.reset) body["cursor-reset"] = true;
+  return json(body);
 }
 
 function providerOf(name: string, data: Record<string, unknown>): string | null {
@@ -337,12 +367,15 @@ export async function handleManagement(request: Request, account: Account): Prom
         return json({ status: "ok", refreshed: refreshed.length, files: refreshed });
       }
       case "GET observability/logs":
+        return logs(url, account);
       case "DELETE observability/logs":
-        return failure(400, "logging to file disabled");
+        if (!account.loggingEnabled()) return failure(400, "logging to file disabled");
+        account.vault.usage.clearLines();
+        return json({ success: true, message: "Logs cleared successfully", removed: 0 });
       case "GET observability/logs/errors":
         return json({ files: [] });
       case "GET observability/usage/api-keys":
-        return json({});
+        return apiKeyUsage(account);
       case "GET observability/usage/queue":
         return json([]);
       case "GET plugins":
