@@ -10,7 +10,7 @@ const CODEX_FORWARDED_HEADERS = new Set(["version", "session_id", "session-id", 
 const CODEX_FORWARDED_PREFIXES = ["x-codex-", "x-openai-internal-codex-"];
 
 // The client-facing API endpoints, with the method and request shape each takes. Gemini's
-// /v1beta/models/{model}:{action} is matched separately.
+// /v1beta/models/{model}:{action} and /v1beta/models/{model} are matched separately.
 const ROUTES = new Map<string, { method: string; format: Format | "models" }>([
   ["/v1/messages", { method: "POST", format: "claude" }],
   ["/v1/messages/count_tokens", { method: "POST", format: "claude" }],
@@ -21,6 +21,7 @@ const ROUTES = new Map<string, { method: string; format: Format | "models" }>([
   ["/v1beta/models", { method: "GET", format: "models" }],
 ]);
 const GEMINI_ACTION = /^\/v1beta\/models\/([^/:]+):(generateContent|streamGenerateContent|countTokens)$/;
+const GEMINI_MODEL = /^\/v1beta\/models\/([^/:]+)$/;
 
 const FORWARDED_HEADERS = new Set(["accept", "content-type", "anthropic-version", "user-agent", "x-app"]);
 const FORWARDED_PREFIXES = ["x-stainless-", "x-claude-code-"];
@@ -34,12 +35,25 @@ export interface Route {
   readonly geminiAction?: string;
 }
 
+// A model name from the path; null when its escapes are malformed.
+function pathModel(raw: string): string | null {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
+
 export function routeOf(pathname: string): Route | null {
   const fixed = ROUTES.get(pathname);
   if (fixed !== undefined) return fixed;
+  const model = GEMINI_MODEL.exec(pathname);
+  const modelName = pathModel(model?.[1] ?? "");
+  if (model !== null) return modelName === null ? null : { method: "GET", format: "models", geminiModel: modelName };
   const gemini = GEMINI_ACTION.exec(pathname);
-  if (gemini === null) return null;
-  return { method: "POST", format: "gemini", geminiModel: decodeURIComponent(gemini[1] ?? ""), geminiAction: gemini[2] ?? "" };
+  const geminiModel = pathModel(gemini?.[1] ?? "");
+  if (gemini === null || geminiModel === null) return null;
+  return { method: "POST", format: "gemini", geminiModel, geminiAction: gemini[2] ?? "" };
 }
 
 export function isProxied(pathname: string): boolean {
@@ -99,6 +113,14 @@ function applyConfiguredHeaders(headers: Headers, credential: UpstreamCredential
   }
 }
 
+// Where a Vertex base URL's models live, as CPA reads it: a full ".../publishers/google/models"
+// path is used as is, and a bare host or version path gets the rest.
+function vertexModels(baseUrl: string): string {
+  if (baseUrl.includes("/publishers/")) return baseUrl;
+  const version = /\/v\d[a-z0-9_-]*$/.test(baseUrl) ? "" : "/v1";
+  return `${baseUrl}${version}/publishers/google/models`;
+}
+
 // The request for an API-key provider in its own format. `body` is the client body, with the
 // model already swapped for the upstream name when they differ.
 export function providerRequest(request: Request, url: URL, route: Route, credential: UpstreamCredential, model: string, body: BodyInit | null): Request {
@@ -118,9 +140,26 @@ export function providerRequest(request: Request, url: URL, route: Route, creden
       headers.set("x-goog-api-key", credential.apiKey);
       target = `${credential.baseUrl}/v1beta/models/${encodeURIComponent(model)}:${route.geminiAction ?? "generateContent"}${forwardedSearch(url)}`;
       break;
+    case "vertex":
+      // A service account login has no key: its token comes as a configured header instead.
+      if (credential.apiKey !== "") headers.set("x-goog-api-key", credential.apiKey);
+      target = `${vertexModels(credential.baseUrl)}/${encodeURIComponent(model)}:${route.geminiAction ?? "generateContent"}${forwardedSearch(url)}`;
+      break;
+    case "kimi": {
+      // The login's token and Kimi's identity headers come as configured headers.
+      if (route.format === "claude" && !headers.has("anthropic-version")) headers.set("anthropic-version", "2023-06-01");
+      if (route.format === "claude" && request.headers.has("anthropic-beta")) headers.set("anthropic-beta", request.headers.get("anthropic-beta") ?? "");
+      const path = route.format === "claude" ? url.pathname : route.format === "openai" ? "/v1/chat/completions" : "/v1/responses";
+      target = `${credential.baseUrl}${path}`;
+      break;
+    }
     case "codex":
       headers.set("authorization", `Bearer ${credential.apiKey}`);
       target = `${credential.baseUrl}/responses`;
+      break;
+    case "xai":
+      headers.set("authorization", `Bearer ${credential.apiKey}`);
+      target = `${credential.baseUrl}/${route.format === "openai" ? "chat/completions" : "responses"}`;
       break;
     case "openai-compatibility":
       headers.set("authorization", `Bearer ${credential.apiKey}`);

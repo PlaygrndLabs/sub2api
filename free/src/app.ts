@@ -1,14 +1,16 @@
-import { hashKey, REFRESH_MARGIN_SECONDS, type Backend } from "./account.ts";
+import { hashKey, REFRESH_MARGIN_SECONDS, type Backend, type ServedLogin } from "./account.ts";
 import type { Fetcher } from "./claude-oauth.ts";
 import { claudeToGemini, geminiClaudeMessage, GeminiClaudeStream } from "./claude-gemini.ts";
 import { chatClaudeMessage, ChatClaudeStream, claudeToChat } from "./claude-openai.ts";
 import { claudeEventStream, claudeMessage, ClaudeStream, claudeToResponses, type EventTranslator, type Json } from "./claude-responses.ts";
 import { chatCompletion, ChatStream, chatToClaude } from "./openai-claude.ts";
 import { geminiResponse, GeminiStream, geminiToClaude } from "./gemini-claude.ts";
+import { kimiUpstreamModel } from "./kimi-oauth.ts";
 import { responsesResponse, ResponsesStream, responsesToClaude } from "./responses-claude.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
+import { availableModels, CatalogCache, claudeModelList, geminiModel, geminiModelList, openaiModelList } from "./models.ts";
 import { loginPage, messagePage } from "./pages.ts";
-import { candidates, inDefaultFamily, listedModels, NATIVE_FORMAT, ordered, type Candidate, type Format, type RoutingTable } from "./providers.ts";
+import { candidates, inDefaultFamily, NATIVE_FORMAT, ordered, takesNatively, type Candidate, type Format, type RoutingTable } from "./providers.ts";
 import { CODEX_UPSTREAM, codexRequest, downstreamResponse, formatError, presentedKey, providerRequest, routeOf, upstreamRequest, UPSTREAM, type Route } from "./proxy.ts";
 import { apiKeyKey, loginKey, requestLine, type Attempt, type UsageRecord } from "./usage.ts";
 import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "./session.ts";
@@ -33,7 +35,9 @@ export class EdgeCache {
   readonly keys = new Map<string, number>();
   token: { value: string; name: string; expiresAt: number; cachedUntil: number } | null = null;
   codexToken: { value: string; name: string; accountId: string; expiresAt: number; cachedUntil: number } | null = null;
+  readonly logins = new Map<ServedLogin, { value: string; name: string; endpoint: string; headers: Record<string, string>; expiresAt: number; cachedUntil: number }>();
   routing: { table: RoutingTable; until: number } | null = null;
+  readonly catalog = new CatalogCache();
   turn = 0;
   usage: UsageRecord[] = [];
   flushing = false;
@@ -44,6 +48,7 @@ export class EdgeCache {
     this.routing = null;
     this.token = null;
     this.codexToken = null;
+    this.logins.clear();
   }
 }
 
@@ -136,6 +141,25 @@ async function codexAccess(config: AppConfig): Promise<{ token: string; accountI
   const accountId = result.accountId ?? "";
   config.cache.codexToken = { value: result.accessToken, name: result.name ?? "", accountId, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS };
   return { token: result.accessToken, accountId };
+}
+
+// A login's token and where its requests go, kept fresh by the Durable Object.
+interface LoginAccess {
+  readonly token: string;
+  readonly endpoint: string;
+  readonly headers: Record<string, string>;
+}
+
+async function loginAccess(config: AppConfig, provider: ServedLogin): Promise<LoginAccess | { status: number; message: string }> {
+  const cached = config.cache.logins.get(provider);
+  const now = config.nowSeconds();
+  if (cached !== undefined && cached.cachedUntil > now && cached.expiresAt - now > REFRESH_MARGIN_SECONDS) return { token: cached.value, endpoint: cached.endpoint, headers: cached.headers };
+  const result = await config.backend.loginToken(provider);
+  if (!result.ok) return { status: result.status, message: result.message };
+  const endpoint = result.endpoint ?? "";
+  const headers = result.headers ?? {};
+  config.cache.logins.set(provider, { value: result.accessToken, name: result.name ?? "", endpoint, headers, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS });
+  return { token: result.accessToken, endpoint, headers };
 }
 
 // Fields the ChatGPT Codex endpoint refuses, which other Responses clients may send (as CPA strips).
@@ -290,7 +314,7 @@ async function viaClaudeMessages(request: Request, url: URL, route: Route & { fo
       ? { ...geminiToClaude(client, candidate.model, route.geminiAction === "streamGenerateContent"), customTools: new Set<string>() }
       : { ...chatToClaude(client, candidate.model), customTools: new Set<string>() };
   let upstream: Response | null;
-  if (candidate.credential.kind === "claude") {
+  if (NATIVE_FORMAT[candidate.credential.kind] === "claude") {
     // The client's own headers describe an OpenAI request, so none of them go upstream.
     const bare = new Request(request.url, { method: "POST" });
     const target = new URL("/v1/messages", request.url);
@@ -327,11 +351,22 @@ const RETRY_STATUSES = new Set([401, 403, 408, 429, 500, 502, 503, 504, 529]);
 const MAX_ATTEMPTS = 3;
 const CLAUDE_LOGIN_ID = "claude-login";
 const CODEX_LOGIN_ID = "codex-login";
+// Logins served like an API key of their provider, once their endpoint and token are known.
+const SERVED_LOGIN_IDS = new Map<string, ServedLogin>([
+  ["kimi-login", "kimi"],
+  ["vertex-login", "vertex"],
+]);
 
-function loginCandidate(kind: "claude" | "codex", model: string): Candidate {
-  const id = kind === "claude" ? CLAUDE_LOGIN_ID : CODEX_LOGIN_ID;
-  const baseUrl = kind === "claude" ? UPSTREAM : CODEX_UPSTREAM;
+function loginCandidate(kind: "claude" | "codex" | ServedLogin, model: string): Candidate {
+  const id = kind === "claude" ? CLAUDE_LOGIN_ID : kind === "codex" ? CODEX_LOGIN_ID : `${kind}-login`;
+  const baseUrl = kind === "claude" ? UPSTREAM : kind === "codex" ? CODEX_UPSTREAM : "";
   return { model, credential: { id, kind, group: "oauth", baseUrl, apiKey: "", weight: 1, priority: 0, prefix: "", headers: {}, models: [], excluded: [] } };
+}
+
+async function servedLogin(config: AppConfig, candidate: Candidate, provider: ServedLogin): Promise<{ candidate: Candidate; token: string } | { status: number; message: string }> {
+  const access = await loginAccess(config, provider);
+  if (!("token" in access)) return access;
+  return { token: access.token, candidate: { ...candidate, credential: { ...candidate.credential, baseUrl: access.endpoint, headers: { ...access.headers, authorization: `Bearer ${access.token}` } } } };
 }
 
 // Most clients put "model" first. Then it is read and replaced in place, without parsing the
@@ -376,13 +411,18 @@ function noteAttempt(trace: Trace, config: AppConfig, candidate: Candidate, stat
   let key: string | null = apiKeyKey(candidate.credential);
   if (candidate.credential.id === CLAUDE_LOGIN_ID) key = config.cache.token?.name ? loginKey(config.cache.token.name) : null;
   else if (candidate.credential.id === CODEX_LOGIN_ID) key = config.cache.codexToken?.name ? loginKey(config.cache.codexToken.name) : null;
+  else {
+    const served = SERVED_LOGIN_IDS.get(candidate.credential.id);
+    const name = served === undefined ? "" : (config.cache.logins.get(served)?.name ?? "");
+    if (served !== undefined) key = name === "" ? null : loginKey(name);
+  }
   if (key !== null) trace.attempts.push({ key, ok: status < 400 });
 }
 
 async function proxied(request: Request, url: URL, route: Route & { format: Format }, config: AppConfig, trace: Trace): Promise<Response> {
   const table = await routingTable(config);
   // Claude clients with only Claude logins configured: stream the body through unread.
-  if (route.format === "claude" && !table.codexOAuth && table.credentials.length === 0) {
+  if (route.format === "claude" && !table.codexOAuth && !table.vertexOAuth && !table.kimiOAuth && table.credentials.length === 0) {
     const response = await viaClaudeLogin(request, url, config);
     noteAttempt(trace, config, loginCandidate("claude", ""), response.status);
     return response;
@@ -403,6 +443,11 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   if (route.format === "openai-response" && table.codexOAuth && (inDefaultFamily("codex", model) || usable.length === 0)) usable.push(loginCandidate("codex", model));
   // Claude Code or a Chat client asking for a ChatGPT model by name, e.g. ANTHROPIC_MODEL=gpt-5.6-sol.
   if ((route.format === "claude" || route.format === "openai") && table.codexOAuth && inDefaultFamily("codex", model)) usable.push(loginCandidate("codex", model));
+  // Vertex service accounts take Gemini models, from any client, translated where needed.
+  if (table.vertexOAuth === true && inDefaultFamily("vertex", model)) usable.push(loginCandidate("vertex", model));
+  // Kimi logins take Kimi's models in Anthropic and both OpenAI formats untranslated, and
+  // Gemini clients through Anthropic Messages.
+  if (table.kimiOAuth === true && inDefaultFamily("kimi", model)) usable.push(loginCandidate("kimi", kimiUpstreamModel(model)));
   if (usable.length === 0) {
     if (route.format === "claude" && table.claudeOAuth) {
       const response = await viaClaudeLogin(request, url, config, text);
@@ -419,10 +464,29 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   config.cache.turn += 1;
   const attempts = ordered(usable, config.cache.turn).slice(0, MAX_ATTEMPTS);
   let last: Response | null = null;
-  for (const [index, candidate] of attempts.entries()) {
+  for (const [index, attempt] of attempts.entries()) {
     const isLast = index === attempts.length - 1;
+    let candidate = attempt;
+    let loginToken = "";
+    const served = SERVED_LOGIN_IDS.get(attempt.credential.id);
+    if (served !== undefined) {
+      const resolved = await servedLogin(config, attempt, served);
+      if (!("token" in resolved)) {
+        if (isLast) return formatError(route.format, resolved.status, "api_error", resolved.message);
+        last = new Response(null, { status: resolved.status });
+        continue;
+      }
+      candidate = resolved.candidate;
+      loginToken = resolved.token;
+    }
+    // The provider refused a login's token: the Durable Object gets a new one, at most once a minute.
+    const refused = async (status: number) => {
+      if (status !== 401 || served === undefined) return;
+      config.cache.logins.delete(served);
+      await config.backend.invalidate(loginToken);
+    };
     const body = parsed === null || candidate.model === model ? text : parsed.withModel(candidate.model);
-    const translated = route.format !== NATIVE_FORMAT[candidate.credential.kind];
+    const translated = !takesNatively(candidate.credential.kind, route.format);
     if (translated || candidate.credential.id === CLAUDE_LOGIN_ID || candidate.credential.id === CODEX_LOGIN_ID) {
       let response: Response;
       if (translated && route.format !== "claude") response = await viaClaudeMessages(request, url, route, config, candidate, text);
@@ -430,6 +494,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
       else if (candidate.credential.id === CLAUDE_LOGIN_ID) response = await viaClaudeLogin(request, url, config, body);
       else response = await viaCodexLogin(request, url, config, body);
       noteAttempt(trace, config, candidate, response.status);
+      await refused(response.status);
       if (isLast || !RETRY_STATUSES.has(response.status)) return response;
       await response.body?.cancel();
       last = new Response(null, { status: response.status });
@@ -437,6 +502,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
     }
     const upstream = await config.upstream(providerRequest(request, url, route, candidate.credential, candidate.model, body)).catch(() => null);
     noteAttempt(trace, config, candidate, upstream?.status ?? 502);
+    await refused(upstream?.status ?? 502);
     if (upstream !== null && (isLast || !RETRY_STATUSES.has(upstream.status))) return downstreamResponse(upstream);
     if (upstream !== null) {
       await upstream.body?.cancel();
@@ -446,26 +512,22 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   return formatError(route.format, last?.status ?? 502, "api_error", "No provider could serve the request right now.");
 }
 
-async function modelList(request: Request, url: URL, config: AppConfig): Promise<Response> {
+async function modelList(request: Request, url: URL, route: Route, config: AppConfig): Promise<Response> {
   const table = await routingTable(config);
-  const listed = listedModels(table);
+  // CPA's catalog refreshes after the response, so no request waits for it.
+  const refreshing = config.cache.catalog.refresh(config.upstream, config.nowSeconds());
+  if (refreshing !== null) config.waitUntil?.(refreshing);
+  const models = availableModels(table, config.cache.catalog.current(), config.nowSeconds());
   const headers = { "cache-control": "no-store" };
-  if (url.pathname === "/v1beta/models") {
-    const models = listed.filter((model) => model.kind === "gemini").map((model) => ({ name: `models/${model.id}`, displayName: model.id, supportedGenerationMethods: ["generateContent", "streamGenerateContent", "countTokens"] }));
-    return Response.json({ models }, { headers });
+  if (route.geminiModel !== undefined) {
+    const found = models.find((model) => model.id === route.geminiModel);
+    if (found === undefined) return formatError("gemini", 404, "not_found", `Model ${route.geminiModel} isn't served here.`);
+    return Response.json(geminiModel(found), { headers });
   }
+  if (url.pathname === "/v1beta/models") return Response.json(geminiModelList(models), { headers });
   // Anthropic SDKs and Claude Code get Anthropic's shape, as in CPA; everyone else OpenAI's.
   const anthropic = request.headers.has("anthropic-version") || (request.headers.get("user-agent") ?? "").startsWith("claude-cli");
-  if (!anthropic) {
-    const data = listed.filter((model) => model.kind !== "gemini").map((model) => ({ id: model.id, object: "model", created: 0, owned_by: model.kind }));
-    return Response.json({ object: "list", data }, { headers });
-  }
-  const extra = listed.filter((model) => model.kind === "claude").map((model) => ({ type: "model", id: model.id, display_name: model.id, created_at: "1970-01-01T00:00:00Z" }));
-  if (!table.claudeOAuth) return Response.json({ data: extra, has_more: false, first_id: extra[0]?.id ?? null, last_id: extra.at(-1)?.id ?? null }, { headers });
-  const response = await viaClaudeLogin(request, url, config);
-  if (!response.ok || extra.length === 0) return response;
-  const body = (await response.json()) as { data?: unknown[] };
-  return Response.json({ ...body, data: [...(body.data ?? []), ...extra] }, { headers });
+  return Response.json(anthropic ? claudeModelList(models) : openaiModelList(models), { headers });
 }
 
 // Sends the isolate's usage records to the Durable Object, a few seconds after the first one so
@@ -523,7 +585,7 @@ async function served(request: Request, url: URL, route: Route, config: AppConfi
   if (key === null || !(await keyValid(key, config))) {
     return formatError(route.format, 401, "authentication_error", "Invalid API key. Add one under API Keys in the gateway dashboard.");
   }
-  if (route.format === "models") return modelList(request, url, config);
+  if (route.format === "models") return modelList(request, url, route, config);
   return proxied(request, url, route as Route & { format: Format }, config, trace);
 }
 
