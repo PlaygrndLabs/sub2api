@@ -309,8 +309,6 @@ describe("API-key providers", () => {
     const unknown = await handle(post("/v1/chat/completions", { model: "nothing" }), config);
     expect(unknown.status).toBe(400);
     expect(await unknown.json()).toMatchObject({ error: { type: "invalid_request_error", message: expect.stringMatching(/No provider is configured for model nothing/) } });
-    const wrongShape = await handle(at(`/v1beta/models/kimi:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
-    expect(await wrongShape.json()).toMatchObject({ error: { message: expect.stringMatching(/openai-compatibility provider, which doesn.t take this request format yet/) } });
     backend.table = { ...backend.table, claudeOAuth: false };
     config.cache.forgetConfig();
     expect((await handle(post("/v1/messages", { model: "x" }), config)).status).toBe(400);
@@ -818,5 +816,60 @@ describe("OpenAI Responses clients on other providers", () => {
     const response = await handle(post("/v1/responses", { model: "work/claude-sonnet-5-5", input: "hi" }), config);
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: { message: "Overloaded", type: "api_error", code: null } });
+  });
+});
+
+describe("Gemini clients on other providers", () => {
+  const claudeAnswer = () =>
+    new Response(
+      [
+        { type: "message_start", message: { id: "msg_1", usage: { input_tokens: 4 } } },
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hi" } },
+        { type: "content_block_stop", index: 0 },
+        { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+        { type: "message_stop" },
+      ]
+        .map((event) => `event: x\ndata: ${JSON.stringify(event)}\n\n`)
+        .join(""),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  const body = JSON.stringify({ contents: [{ role: "user", parts: [{ text: "hi" }] }] });
+
+  it("serves a Gemini client from a Claude API key: SSE, a JSON array, whole, and token counts", async () => {
+    const { config, seen } = await providersSetup(async (request) =>
+      ((await request.clone().json()) as { stream?: boolean }).stream ? claudeAnswer() : Response.json({ id: "msg_2", content: [{ type: "text", text: "Hello" }], stop_reason: "end_turn", usage: { input_tokens: 4, output_tokens: 1 } }),
+    );
+    const model = encodeURIComponent("work/claude-sonnet-5-5");
+    const streamed = await handle(at(`/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${KEY}`, { method: "POST", body }), config);
+    expect(streamed.headers.get("content-type")).toMatch(/^text\/event-stream/);
+    const text = await streamed.text();
+    expect(text).toContain('data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Hi"}]}');
+    expect(text).toContain('"finishReason":"STOP"');
+    const [sent] = seen;
+    expect(sent?.url).toBe("https://api.anthropic.com/v1/messages");
+    expect(sent?.headers.get("x-api-key")).toBe("sk-ant-1");
+    expect(sent?.headers.get("x-goog-api-key")).toBeNull();
+    expect(await sent?.json()).toEqual({ model: "claude-sonnet-5-5", max_tokens: 32000, stream: true, messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] });
+    const array = await handle(at(`/v1beta/models/${model}:streamGenerateContent?key=${KEY}`, { method: "POST", body }), config);
+    expect(array.headers.get("content-type")).toMatch(/^application\/json/);
+    expect(await array.json()).toHaveLength(2);
+    const whole = await handle(at(`/v1beta/models/${model}:generateContent?key=${KEY}`, { method: "POST", body }), config);
+    expect(await whole.json()).toMatchObject({ candidates: [{ content: { parts: [{ text: "Hello" }] }, finishReason: "STOP" }], modelVersion: "work/claude-sonnet-5-5" });
+    const count = await handle(at(`/v1beta/models/${model}:countTokens?key=${KEY}`, { method: "POST", body }), config);
+    expect(await count.json()).toEqual({ totalTokens: Math.ceil(body.length / 4) });
+    expect(seen).toHaveLength(3);
+  });
+
+  it("serves a Gemini client from an OpenAI-compatible key, and errors in Gemini's shape", async () => {
+    const chat = () => Response.json({ id: "chatcmpl-1", choices: [{ message: { content: "Hi" }, finish_reason: "stop" }] });
+    const { config, seen } = await providersSetup(async () => chat());
+    const response = await handle(at(`/v1beta/models/kimi:generateContent?key=${KEY}`, { method: "POST", body }), config);
+    expect(await response.json()).toMatchObject({ candidates: [{ content: { parts: [{ text: "Hi" }] } }] });
+    expect(seen[0]?.url).toBe("https://router.example/api/v1/chat/completions");
+    const failing = await providersSetup(async () => Response.json({ error: { message: "Bad key" } }, { status: 403 }));
+    const refused = await handle(at(`/v1beta/models/kimi:generateContent?key=${KEY}`, { method: "POST", body }), failing.config);
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: { code: 403, message: expect.any(String), status: "PERMISSION_DENIED" } });
   });
 });
