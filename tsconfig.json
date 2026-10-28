@@ -34,6 +34,7 @@
     "free/test/account.test.ts",
     "free/test/management.test.ts",
     "free/test/codex.test.ts",
-    "free/test/usage.test.ts"
+    "free/test/usage.test.ts",
+    "free/test/vertex.test.ts"
   ]
 }

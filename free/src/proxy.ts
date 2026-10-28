@@ -113,6 +113,14 @@ function applyConfiguredHeaders(headers: Headers, credential: UpstreamCredential
   }
 }
 
+// Where a Vertex base URL's models live, as CPA reads it: a full ".../publishers/google/models"
+// path is used as is, and a bare host or version path gets the rest.
+function vertexModels(baseUrl: string): string {
+  if (baseUrl.includes("/publishers/")) return baseUrl;
+  const version = /\/v\d[a-z0-9_-]*$/.test(baseUrl) ? "" : "/v1";
+  return `${baseUrl}${version}/publishers/google/models`;
+}
+
 // The request for an API-key provider in its own format. `body` is the client body, with the
 // model already swapped for the upstream name when they differ.
 export function providerRequest(request: Request, url: URL, route: Route, credential: UpstreamCredential, model: string, body: BodyInit | null): Request {
@@ -131,6 +139,11 @@ export function providerRequest(request: Request, url: URL, route: Route, creden
     case "gemini":
       headers.set("x-goog-api-key", credential.apiKey);
       target = `${credential.baseUrl}/v1beta/models/${encodeURIComponent(model)}:${route.geminiAction ?? "generateContent"}${forwardedSearch(url)}`;
+      break;
+    case "vertex":
+      // A service account login has no key: its token comes as a configured header instead.
+      if (credential.apiKey !== "") headers.set("x-goog-api-key", credential.apiKey);
+      target = `${vertexModels(credential.baseUrl)}/${encodeURIComponent(model)}:${route.geminiAction ?? "generateContent"}${forwardedSearch(url)}`;
       break;
     case "codex":
       headers.set("authorization", `Bearer ${credential.apiKey}`);

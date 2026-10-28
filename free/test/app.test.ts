@@ -33,6 +33,11 @@ class FakeBackend implements Backend {
     this.calls.push("codexToken");
     return this.codexResult;
   }
+  vertexResult: TokenResult = { ok: true, accessToken: "ya29.vertex", expiresAt: NOW + 3600, endpoint: "https://us-central1-aiplatform.googleapis.com/v1/projects/p-1/locations/us-central1/publishers/google/models", name: "vertex-p-1.json" };
+  async loginToken(provider: string) {
+    this.calls.push(`loginToken:${provider}`);
+    return this.vertexResult;
+  }
   async invalidate(accessToken: string) {
     this.invalidated.push(accessToken);
   }
@@ -399,6 +404,66 @@ describe("xAI keys", () => {
     expect(seen[0]?.url).toBe("https://api.x.ai/v1/responses");
     expect(seen[0]?.headers.get("anthropic-version")).toBeNull();
     expect(await seen[0]?.json()).toMatchObject({ model: "grok-4.5", stream: true, input: [{ role: "user" }] });
+  });
+});
+
+describe("Vertex", () => {
+  const VERTEX = {
+    "api-keys": {
+      vertex: [
+        { name: "v", keys: [{ "api-key": "vk-1" }] },
+        { name: "zen", prefix: "zen", "base-url": "https://zenmux.example/api/v1", models: [{ name: "gemini-2.5-pro" }], keys: [{ "api-key": "vk-2" }] },
+      ],
+    },
+  };
+  const ENDPOINT = "https://us-central1-aiplatform.googleapis.com/v1/projects/p-1/locations/us-central1/publishers/google/models";
+
+  it("sends Gemini requests to Vertex keys, on Google's host or a configured one", async () => {
+    const { config, backend, seen } = await setup();
+    backend.table = { credentials: upstreamCredentials(VERTEX), claudeOAuth: false, codexOAuth: false };
+    await handle(at(`/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${KEY}`, { method: "POST", body: "{}" }), config);
+    await handle(at(`/v1beta/models/zen%2Fgemini-2.5-pro:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(seen.map((request) => request.url)).toEqual([
+      "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+      "https://zenmux.example/api/v1/publishers/google/models/gemini-2.5-pro:generateContent",
+    ]);
+    expect(seen.map((request) => request.headers.get("x-goog-api-key"))).toEqual(["vk-1", "vk-2"]);
+    const listed = (await (await handle(at(`/v1beta/models?key=${KEY}`), config)).json()) as { models: { name: string }[] };
+    expect(listed.models.map((model) => model.name)).toEqual(expect.arrayContaining(["models/gemini-2.5-flash", "models/zen/gemini-2.5-pro"]));
+  });
+
+  it("serves Gemini and Claude clients through an imported service account", async () => {
+    const { config, backend, seen } = await setup();
+    backend.table = { credentials: [], claudeOAuth: false, codexOAuth: false, vertexOAuth: true };
+    await handle(at(`/v1beta/models/gemini-2.5-flash:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(seen[0]?.url).toBe(`${ENDPOINT}/gemini-2.5-flash:generateContent`);
+    expect(seen[0]?.headers.get("authorization")).toBe("Bearer ya29.vertex");
+    expect(seen[0]?.headers.get("x-goog-api-key")).toBeNull();
+    await handle(post("/v1/messages", { model: "gemini-2.5-pro", stream: true, max_tokens: 50, messages: [{ role: "user", content: "hi" }] }), config);
+    expect(seen[1]?.url).toBe(`${ENDPOINT}/gemini-2.5-pro:streamGenerateContent?alt=sse`);
+    expect(seen[1]?.headers.get("authorization")).toBe("Bearer ya29.vertex");
+    expect(await seen[1]?.json()).toMatchObject({ contents: [{ role: "user" }] });
+    expect(backend.calls.filter((call) => call === "loginToken:vertex")).toHaveLength(1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  it("asks for a new token when Google refuses one", async () => {
+    const { config, backend } = await setup(async () => new Response("no", { status: 401 }));
+    backend.table = { credentials: [], claudeOAuth: false, codexOAuth: false, vertexOAuth: true };
+    const response = await handle(at(`/v1beta/models/gemini-2.5-flash:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(response.status).toBe(401);
+    expect(backend.invalidated).toEqual(["ya29.vertex"]);
+    expect(config.cache.logins.has("vertex")).toBe(false);
+  });
+
+  it("explains a service account that can't mint a token, in the client's shape", async () => {
+    const { config, backend, seen } = await setup();
+    backend.table = { credentials: [], claudeOAuth: false, codexOAuth: false, vertexOAuth: true };
+    backend.vertexResult = { ok: false, status: 503, message: "Google refused the Vertex service account" };
+    const response = await handle(at(`/v1beta/models/gemini-2.5-flash:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { message: "Google refused the Vertex service account" } });
+    expect(seen).toHaveLength(0);
   });
 });
 
