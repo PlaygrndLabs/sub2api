@@ -1,6 +1,7 @@
 import { OAuthError, authorizeUrl, exchangeCode, parseCallback, randomToken, refresh, type Fetcher } from "./claude-oauth.ts";
 import * as codex from "./codex-oauth.ts";
 import { Config } from "./config.ts";
+import { CatalogCache } from "./models.ts";
 import { upstreamCredentials, type RoutingTable, type UpstreamCredential } from "./providers.ts";
 import { storedKey, type UsageRecord } from "./usage.ts";
 import { claudeCredential, claudeFileData, type CredentialFile, type LoginSession, type Vault } from "./vault.ts";
@@ -54,6 +55,8 @@ export class Account {
   private readonly refreshing = new Map<string, Promise<TokenResult>>();
   private readonly lastForcedRefresh = new Map<string, number>();
   private readonly next = new Map<LoginProvider, number>();
+  // CPA's model catalog, for the dashboard's model lists.
+  readonly catalog = new CatalogCache();
 
   constructor(
     readonly vault: Vault,
@@ -74,10 +77,12 @@ export class Account {
   }
 
   // What the Worker needs to pick an upstream for a request: the configured API-key providers
-  // and whether any Claude login is on.
+  // and which logins are on.
   async routing(): Promise<RoutingTable> {
     this.upstreams ??= upstreamCredentials(this.currentConfig().read([]));
-    return { credentials: this.upstreams, claudeOAuth: this.loginFiles("claude").length > 0, codexOAuth: this.loginFiles("codex").length > 0 };
+    const codexFiles = this.loginFiles("codex");
+    const codexPlans = codexFiles.map((file) => (typeof file.data.plan_type === "string" ? file.data.plan_type : ""));
+    return { credentials: this.upstreams, claudeOAuth: this.loginFiles("claude").length > 0, codexOAuth: codexFiles.length > 0, codexPlans };
   }
 
   async keyValid(hash: string): Promise<boolean> {

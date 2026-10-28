@@ -5,8 +5,9 @@ import { chatClaudeMessage, ChatClaudeStream, claudeToChat } from "./claude-open
 import { claudeEventStream, claudeMessage, ClaudeStream, claudeToResponses } from "./claude-responses.ts";
 import { chatCompletion, ChatStream, chatToClaude } from "./openai-claude.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
+import { availableModels, CatalogCache, claudeModelList, geminiModel, geminiModelList, openaiModelList } from "./models.ts";
 import { loginPage, messagePage } from "./pages.ts";
-import { candidates, inDefaultFamily, listedModels, NATIVE_FORMAT, ordered, type Candidate, type Format, type RoutingTable } from "./providers.ts";
+import { candidates, inDefaultFamily, NATIVE_FORMAT, ordered, type Candidate, type Format, type RoutingTable } from "./providers.ts";
 import { CODEX_UPSTREAM, codexRequest, downstreamResponse, formatError, presentedKey, providerRequest, routeOf, upstreamRequest, UPSTREAM, type Route } from "./proxy.ts";
 import { apiKeyKey, loginKey, requestLine, type Attempt, type UsageRecord } from "./usage.ts";
 import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "./session.ts";
@@ -32,6 +33,7 @@ export class EdgeCache {
   token: { value: string; name: string; expiresAt: number; cachedUntil: number } | null = null;
   codexToken: { value: string; name: string; accountId: string; expiresAt: number; cachedUntil: number } | null = null;
   routing: { table: RoutingTable; until: number } | null = null;
+  readonly catalog = new CatalogCache();
   turn = 0;
   usage: UsageRecord[] = [];
   flushing = false;
@@ -422,26 +424,22 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   return formatError(route.format, last?.status ?? 502, "api_error", "No provider could serve the request right now.");
 }
 
-async function modelList(request: Request, url: URL, config: AppConfig): Promise<Response> {
+async function modelList(request: Request, url: URL, route: Route, config: AppConfig): Promise<Response> {
   const table = await routingTable(config);
-  const listed = listedModels(table);
+  // CPA's catalog refreshes after the response, so no request waits for it.
+  const refreshing = config.cache.catalog.refresh(config.upstream, config.nowSeconds());
+  if (refreshing !== null) config.waitUntil?.(refreshing);
+  const models = availableModels(table, config.cache.catalog.current(), config.nowSeconds());
   const headers = { "cache-control": "no-store" };
-  if (url.pathname === "/v1beta/models") {
-    const models = listed.filter((model) => model.kind === "gemini").map((model) => ({ name: `models/${model.id}`, displayName: model.id, supportedGenerationMethods: ["generateContent", "streamGenerateContent", "countTokens"] }));
-    return Response.json({ models }, { headers });
+  if (route.geminiModel !== undefined) {
+    const found = models.find((model) => model.id === route.geminiModel);
+    if (found === undefined) return formatError("gemini", 404, "not_found", `Model ${route.geminiModel} isn't served here.`);
+    return Response.json(geminiModel(found), { headers });
   }
+  if (url.pathname === "/v1beta/models") return Response.json(geminiModelList(models), { headers });
   // Anthropic SDKs and Claude Code get Anthropic's shape, as in CPA; everyone else OpenAI's.
   const anthropic = request.headers.has("anthropic-version") || (request.headers.get("user-agent") ?? "").startsWith("claude-cli");
-  if (!anthropic) {
-    const data = listed.filter((model) => model.kind !== "gemini").map((model) => ({ id: model.id, object: "model", created: 0, owned_by: model.kind }));
-    return Response.json({ object: "list", data }, { headers });
-  }
-  const extra = listed.filter((model) => model.kind === "claude").map((model) => ({ type: "model", id: model.id, display_name: model.id, created_at: "1970-01-01T00:00:00Z" }));
-  if (!table.claudeOAuth) return Response.json({ data: extra, has_more: false, first_id: extra[0]?.id ?? null, last_id: extra.at(-1)?.id ?? null }, { headers });
-  const response = await viaClaudeLogin(request, url, config);
-  if (!response.ok || extra.length === 0) return response;
-  const body = (await response.json()) as { data?: unknown[] };
-  return Response.json({ ...body, data: [...(body.data ?? []), ...extra] }, { headers });
+  return Response.json(anthropic ? claudeModelList(models) : openaiModelList(models), { headers });
 }
 
 // Sends the isolate's usage records to the Durable Object, a few seconds after the first one so
@@ -499,7 +497,7 @@ async function served(request: Request, url: URL, route: Route, config: AppConfi
   if (key === null || !(await keyValid(key, config))) {
     return formatError(route.format, 401, "authentication_error", "Invalid API key. Add one under API Keys in the gateway dashboard.");
   }
-  if (route.format === "models") return modelList(request, url, config);
+  if (route.format === "models") return modelList(request, url, route, config);
   return proxied(request, url, route as Route & { format: Format }, config, trace);
 }
 
