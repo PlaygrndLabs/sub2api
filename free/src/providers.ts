@@ -66,6 +66,8 @@ export interface RoutingTable {
   readonly claudeOAuth: boolean;
   // Whether at least one ChatGPT (Codex) OAuth login is enabled.
   readonly codexOAuth: boolean;
+  // The plans of the enabled ChatGPT logins, which decide the models they list.
+  readonly codexPlans?: readonly string[];
 }
 
 export interface Candidate {
@@ -212,19 +214,4 @@ export function ordered(found: readonly Candidate[], turn: number): Candidate[] 
   }
   const rotated = [...top.slice(first), ...top.slice(0, first)];
   return [...rotated, ...found.slice(top.length)];
-}
-
-// Every model name clients can ask for by name, for the model lists.
-export function listedModels(table: RoutingTable): { id: string; kind: ProviderKind }[] {
-  const seen = new Set<string>();
-  const models: { id: string; kind: ProviderKind }[] = [];
-  for (const credential of table.credentials) {
-    for (const mapping of credential.models) {
-      const id = credential.prefix === "" ? mapping.alias : `${credential.prefix}/${mapping.alias}`;
-      if (seen.has(id) || excluded(mapping.name, credential.excluded)) continue;
-      seen.add(id);
-      models.push({ id, kind: credential.kind });
-    }
-  }
-  return models;
 }

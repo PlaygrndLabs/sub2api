@@ -10,7 +10,7 @@ const CODEX_FORWARDED_HEADERS = new Set(["version", "session_id", "session-id", 
 const CODEX_FORWARDED_PREFIXES = ["x-codex-", "x-openai-internal-codex-"];
 
 // The client-facing API endpoints, with the method and request shape each takes. Gemini's
-// /v1beta/models/{model}:{action} is matched separately.
+// /v1beta/models/{model}:{action} and /v1beta/models/{model} are matched separately.
 const ROUTES = new Map<string, { method: string; format: Format | "models" }>([
   ["/v1/messages", { method: "POST", format: "claude" }],
   ["/v1/messages/count_tokens", { method: "POST", format: "claude" }],
@@ -21,6 +21,7 @@ const ROUTES = new Map<string, { method: string; format: Format | "models" }>([
   ["/v1beta/models", { method: "GET", format: "models" }],
 ]);
 const GEMINI_ACTION = /^\/v1beta\/models\/([^/:]+):(generateContent|streamGenerateContent|countTokens)$/;
+const GEMINI_MODEL = /^\/v1beta\/models\/([^/:]+)$/;
 
 const FORWARDED_HEADERS = new Set(["accept", "content-type", "anthropic-version", "user-agent", "x-app"]);
 const FORWARDED_PREFIXES = ["x-stainless-", "x-claude-code-"];
@@ -34,12 +35,25 @@ export interface Route {
   readonly geminiAction?: string;
 }
 
+// A model name from the path; null when its escapes are malformed.
+function pathModel(raw: string): string | null {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
+
 export function routeOf(pathname: string): Route | null {
   const fixed = ROUTES.get(pathname);
   if (fixed !== undefined) return fixed;
+  const model = GEMINI_MODEL.exec(pathname);
+  const modelName = pathModel(model?.[1] ?? "");
+  if (model !== null) return modelName === null ? null : { method: "GET", format: "models", geminiModel: modelName };
   const gemini = GEMINI_ACTION.exec(pathname);
-  if (gemini === null) return null;
-  return { method: "POST", format: "gemini", geminiModel: decodeURIComponent(gemini[1] ?? ""), geminiAction: gemini[2] ?? "" };
+  const geminiModel = pathModel(gemini?.[1] ?? "");
+  if (gemini === null || geminiModel === null) return null;
+  return { method: "POST", format: "gemini", geminiModel, geminiAction: gemini[2] ?? "" };
 }
 
 export function isProxied(pathname: string): boolean {
