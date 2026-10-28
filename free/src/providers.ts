@@ -2,31 +2,39 @@
 // model is matched to them. Each provider holds named groups (one endpoint, shared settings)
 // and a list of keys; a key may override the group's settings, as in CPA.
 
-export type ProviderKind = "claude" | "gemini" | "codex" | "xai" | "openai-compatibility";
+// "kimi" is a Kimi login served like a key; CPA's config has no Kimi keys, so it isn't read there.
+export type ProviderKind = "claude" | "gemini" | "vertex" | "codex" | "xai" | "kimi" | "openai-compatibility";
 // The request shapes clients send: Anthropic Messages, OpenAI Chat Completions, OpenAI
 // Responses, and Gemini generateContent.
 export type Format = "claude" | "openai" | "openai-response" | "gemini";
 
-export const PROVIDER_KINDS: readonly ProviderKind[] = ["claude", "gemini", "codex", "xai", "openai-compatibility"];
+export const PROVIDER_KINDS: readonly ProviderKind[] = ["claude", "gemini", "vertex", "codex", "xai", "openai-compatibility"];
 
 export const NATIVE_FORMAT: Record<ProviderKind, Format> = {
   claude: "claude",
   gemini: "gemini",
+  vertex: "gemini",
   codex: "openai-response",
   xai: "openai-response",
+  kimi: "claude",
   "openai-compatibility": "openai",
 };
 
-// xAI also serves OpenAI Chat Completions itself, so Chat clients reach it untranslated.
+// xAI also serves OpenAI Chat Completions itself, and Kimi both OpenAI formats as well as
+// Anthropic's, so those clients reach them untranslated.
 export function takesNatively(kind: ProviderKind, format: Format): boolean {
-  return NATIVE_FORMAT[kind] === format || (kind === "xai" && format === "openai");
+  if (kind === "xai") return format === "openai-response" || format === "openai";
+  if (kind === "kimi") return format !== "gemini";
+  return NATIVE_FORMAT[kind] === format;
 }
 
 export const DEFAULT_BASE_URL: Record<ProviderKind, string> = {
   claude: "https://api.anthropic.com",
   gemini: "https://generativelanguage.googleapis.com",
+  vertex: "https://aiplatform.googleapis.com",
   codex: "https://chatgpt.com/backend-api/codex",
   xai: "https://api.x.ai/v1",
+  kimi: "https://api.kimi.com/coding",
   "openai-compatibility": "",
 };
 
@@ -34,8 +42,10 @@ export const DEFAULT_BASE_URL: Record<ProviderKind, string> = {
 const DEFAULT_FAMILY: Record<ProviderKind, RegExp | null> = {
   claude: /^claude-/i,
   gemini: /^gemini-/i,
+  vertex: /^gemini-/i,
   codex: /^(gpt-|codex-|o\d)/i,
   xai: /^grok-/i,
+  kimi: /^kimi-/i,
   "openai-compatibility": null,
 };
 
@@ -68,6 +78,10 @@ export interface RoutingTable {
   readonly codexOAuth: boolean;
   // The plans of the enabled ChatGPT logins, which decide the models they list.
   readonly codexPlans?: readonly string[];
+  // Whether at least one Vertex service account is enabled.
+  readonly vertexOAuth?: boolean;
+  // Whether at least one Kimi login is enabled.
+  readonly kimiOAuth?: boolean;
 }
 
 export interface Candidate {
