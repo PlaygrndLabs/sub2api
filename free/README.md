@@ -2,16 +2,17 @@
 
 A container-free version of sub2api that runs on Cloudflare's **free** Workers plan. It is a TypeScript rewrite of CPA (CLIProxyAPI), not CPA itself, and serves **CPA's own dashboard** (Cli-Proxy-API-Management-Center) through a port of CPA's v8 management API. So both installs look and work the same in the browser.
 
-It covers **Claude and ChatGPT (Codex) subscriptions** and **API keys** for Claude, Gemini, Codex, xAI and any OpenAI-compatible provider. More OAuth providers and format translation come in later phases.
+It covers **Claude and ChatGPT (Codex) subscriptions** and **API keys** for Claude, Gemini, Vertex AI, Codex, xAI and any OpenAI-compatible provider, plus **Vertex AI service accounts**. More OAuth providers and format translation come in later phases.
 
 - CPA's dashboard, downloaded at build time from the latest panel release (pin one with `PANEL_VERSION`, and its checksum with `PANEL_SHA256`).
 - Claude and ChatGPT (Codex) OAuth logins from the dashboard's **OAuth Login** page (the same PKCE flows as CPA, Claude Code and the Codex CLI), with tokens refreshed automatically.
 - Several logins per provider, used in turn. Upload, download, disable, edit and delete them under **Auth Files**, in CPA's auth-file format, so files move between the two installs.
 - CPA's YAML config, edited in the **Config Panel**. Client API keys live in `access.api-keys`, as in CPA.
 - `POST /v1/messages` and `POST /v1/messages/count_tokens`, streamed straight through to Anthropic.
-- API-key providers added under **AI Providers** (CPA's `api-keys` config): Claude, Gemini, Codex, xAI and OpenAI-compatible endpoints such as OpenRouter. Model aliases, `prefix/model` routing, priorities, key weights and excluded models work as in CPA, and a request moves on to the next key when one is rate limited or failing.
+- API-key providers added under **AI Providers** (CPA's `api-keys` config): Claude, Gemini, Vertex AI, Codex, xAI and OpenAI-compatible endpoints such as OpenRouter. Model aliases, `prefix/model` routing, priorities, key weights and excluded models work as in CPA, and a request moves on to the next key when one is rate limited or failing.
 - Codex CLI through a ChatGPT login, on `/backend-api/codex/responses` or `/v1/responses`. Other OpenAI Responses clients work too: their requests are adapted to what the ChatGPT endpoint takes, and a non-streaming request gets the final response as JSON.
 - Claude Code on an OpenAI-compatible key (OpenRouter and the like): ask for one of the provider's model aliases and the request goes out as Chat Completions, with the answer streamed back as Anthropic events, following CPA's Claude-to-OpenAI translator.
+- Vertex AI service accounts imported under **OAuth Login** (a Google Cloud key file and a region, as in CPA). The Durable Object signs in to Google with the key and refreshes the token hourly. Gemini clients use them as they are, and Claude Code through the Gemini translator below.
 - xAI keys take OpenAI Responses and Chat clients as they are, and Claude Code through the Claude-to-Responses translator below (for example `ANTHROPIC_MODEL=grok-4.5`).
 - Claude Code on a ChatGPT login or a Codex API key: ask for a ChatGPT model (for example `ANTHROPIC_MODEL=gpt-5.6-sol`) and the request is translated to OpenAI Responses and the answer streamed back as Anthropic events, with thinking, tool calls and images, following CPA's Claude-to-Codex translator.
 - Claude Code on a Gemini API key: ask for a Gemini model (for example `ANTHROPIC_MODEL=gemini-2.5-flash`) and the request goes out as Gemini `generateContent`, with thinking, tool calls and images, following CPA's Claude-to-Gemini translator. Unlike CPA, Google's default safety filters stay on; a blocked answer ends with a `refusal` stop reason.

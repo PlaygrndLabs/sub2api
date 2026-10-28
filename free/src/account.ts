@@ -5,14 +5,20 @@ import { CatalogCache } from "./models.ts";
 import { upstreamCredentials, type RoutingTable, type UpstreamCredential } from "./providers.ts";
 import { storedKey, type UsageRecord } from "./usage.ts";
 import { claudeCredential, claudeFileData, type CredentialFile, type LoginSession, type Vault } from "./vault.ts";
+import { mintToken, vertexLogin, vertexModelsUrl } from "./vertex-auth.ts";
 
-// `name` is the login file the token belongs to, for its usage counts.
-export type TokenResult = { ok: true; accessToken: string; expiresAt: number; accountId?: string; name?: string } | { ok: false; status: number; message: string };
+// `name` is the login file the token belongs to, for its usage counts. `endpoint` is where a
+// Vertex service account's requests go, which depends on its project and location.
+export type TokenResult = { ok: true; accessToken: string; expiresAt: number; accountId?: string; endpoint?: string; name?: string } | { ok: false; status: number; message: string };
 
-// The subscription logins the gateway signs in to and keeps fresh.
-export type LoginProvider = "claude" | "codex";
-export const LOGIN_PROVIDERS: readonly LoginProvider[] = ["claude", "codex"];
-const LABEL: Record<LoginProvider, string> = { claude: "Claude", codex: "ChatGPT (Codex)" };
+// The logins the gateway keeps fresh: subscriptions signed in to from the dashboard, and Vertex
+// service accounts imported there.
+export type LoginProvider = "claude" | "codex" | "vertex";
+export type OAuthProvider = Exclude<LoginProvider, "vertex">;
+// Logins the Worker serves like an API key of their provider, with a token and an endpoint.
+export type ServedLogin = "vertex";
+export const LOGIN_PROVIDERS: readonly LoginProvider[] = ["claude", "codex", "vertex"];
+const LABEL: Record<LoginProvider, string> = { claude: "Claude", codex: "ChatGPT (Codex)", vertex: "Vertex AI" };
 
 // Everything the Worker asks of the Durable Object. The Durable Object is one instance, so the
 // state below (config, token refreshes, login sessions) is never raced by another copy.
@@ -20,6 +26,7 @@ export interface Backend {
   keyValid(hash: string): Promise<boolean>;
   token(): Promise<TokenResult>;
   codexToken(): Promise<TokenResult>;
+  loginToken(provider: ServedLogin): Promise<TokenResult>;
   invalidate(accessToken: string): Promise<void>;
   attemptAllowed(client: string): Promise<boolean>;
   manage(request: Request): Promise<Response>;
@@ -35,10 +42,15 @@ interface Login {
   readonly refreshToken: string;
   readonly expiresAt: number;
   readonly accountId: string;
+  readonly endpoint?: string;
 }
 
 function loginOf(file: CredentialFile): Login | null {
   if (file.provider === "codex") return codex.codexCredential(file.data);
+  if (file.provider === "vertex") {
+    const login = vertexLogin(file.data);
+    return login === null ? null : { accessToken: login.accessToken, refreshToken: "", expiresAt: login.expiresAt, accountId: "", endpoint: vertexModelsUrl(login) };
+  }
   const credential = claudeCredential(file.data);
   return credential === null ? null : { ...credential, accountId: "" };
 }
@@ -82,7 +94,7 @@ export class Account {
     this.upstreams ??= upstreamCredentials(this.currentConfig().read([]));
     const codexFiles = this.loginFiles("codex");
     const codexPlans = codexFiles.map((file) => (typeof file.data.plan_type === "string" ? file.data.plan_type : ""));
-    return { credentials: this.upstreams, claudeOAuth: this.loginFiles("claude").length > 0, codexOAuth: codexFiles.length > 0, codexPlans };
+    return { credentials: this.upstreams, claudeOAuth: this.loginFiles("claude").length > 0, codexOAuth: codexFiles.length > 0, codexPlans, vertexOAuth: this.loginFiles("vertex").length > 0 };
   }
 
   async keyValid(hash: string): Promise<boolean> {
@@ -120,7 +132,7 @@ export class Account {
 
   async tokenFor(file: CredentialFile, force = false): Promise<TokenResult> {
     const current = loginOf(file);
-    if (current === null) return { ok: false, status: 503, message: `The login ${file.name} has no tokens: sign in again.` };
+    if (current === null) return { ok: false, status: 503, message: file.provider === "vertex" ? `The Vertex file ${file.name} has no usable service account: import it again.` : `The login ${file.name} has no tokens: sign in again.` };
     if (!force && current.expiresAt - this.nowSeconds() > REFRESH_MARGIN_SECONDS) return granted(current, file.name);
     let pending = this.refreshing.get(file.name);
     if (pending === undefined) {
@@ -161,7 +173,7 @@ export class Account {
     return this.vault.attemptAllowed(client, this.nowSeconds());
   }
 
-  async startLogin(provider: LoginProvider): Promise<{ url: string; state: string }> {
+  async startLogin(provider: OAuthProvider): Promise<{ url: string; state: string }> {
     const state = randomToken(32);
     const verifier = randomToken(96);
     this.vault.saveSession({ state, provider, verifier, createdAt: this.nowSeconds(), status: "wait", error: "" }, this.nowSeconds());
@@ -210,10 +222,16 @@ export class Account {
   }
 
   private async refresh(file: CredentialFile, current: Login): Promise<TokenResult> {
-    const label = file.provider === "codex" ? LABEL.codex : LABEL.claude;
+    const label = Object.hasOwn(LABEL, file.provider) ? LABEL[file.provider as LoginProvider] : file.provider;
     try {
       let next: Login;
-      if (file.provider === "codex") {
+      if (file.provider === "vertex") {
+        const login = vertexLogin(file.data);
+        if (login === null) throw new OAuthError("the file has no usable service account", 400);
+        const minted = await mintToken(this.fetcher, login.account, this.nowSeconds());
+        this.vault.saveCredentialFile(file.name, file.provider, { ...file.data, access_token: minted.accessToken, expired: new Date(minted.expiresAt * 1000).toISOString() }, this.nowSeconds());
+        next = { ...current, ...minted };
+      } else if (file.provider === "codex") {
         const refreshed = await codex.refresh(this.fetcher, codex.codexCredential(file.data) as codex.CodexCredential, this.nowSeconds());
         this.vault.saveCredentialFile(file.name, file.provider, { ...file.data, ...codex.codexFileData(refreshed) }, this.nowSeconds());
         next = refreshed;
@@ -227,7 +245,8 @@ export class Account {
     } catch (error) {
       if (error instanceof OAuthError && (error.status === 400 || error.status === 401)) {
         this.vault.setCredentialStatus(file.name, false, "token expired", this.nowSeconds());
-        return { ok: false, status: 503, message: `The ${label} login has expired: sign in again under OAuth login in the dashboard.` };
+        const message = file.provider === "vertex" ? `Google refused the Vertex service account ${file.name}: check its key and roles, then import it again.` : `The ${label} login has expired: sign in again under OAuth login in the dashboard.`;
+        return { ok: false, status: 503, message };
       }
       // A token that hasn't actually expired yet is still worth using.
       if (current.expiresAt > this.nowSeconds()) return granted(current, file.name);
@@ -238,6 +257,6 @@ export class Account {
 }
 
 function granted(login: Login, name: string): TokenResult {
-  const result = { ok: true as const, accessToken: login.accessToken, expiresAt: login.expiresAt, name };
+  const result = { ok: true as const, accessToken: login.accessToken, expiresAt: login.expiresAt, name, ...(login.endpoint === undefined ? {} : { endpoint: login.endpoint }) };
   return login.accountId === "" ? result : { ...result, accountId: login.accountId };
 }

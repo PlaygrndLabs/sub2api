@@ -1,4 +1,4 @@
-import { hashKey, REFRESH_MARGIN_SECONDS, type Backend } from "./account.ts";
+import { hashKey, REFRESH_MARGIN_SECONDS, type Backend, type ServedLogin } from "./account.ts";
 import type { Fetcher } from "./claude-oauth.ts";
 import { claudeToGemini, geminiClaudeMessage, GeminiClaudeStream } from "./claude-gemini.ts";
 import { chatClaudeMessage, ChatClaudeStream, claudeToChat } from "./claude-openai.ts";
@@ -32,6 +32,7 @@ export class EdgeCache {
   readonly keys = new Map<string, number>();
   token: { value: string; name: string; expiresAt: number; cachedUntil: number } | null = null;
   codexToken: { value: string; name: string; accountId: string; expiresAt: number; cachedUntil: number } | null = null;
+  readonly logins = new Map<ServedLogin, { value: string; name: string; endpoint: string; expiresAt: number; cachedUntil: number }>();
   routing: { table: RoutingTable; until: number } | null = null;
   readonly catalog = new CatalogCache();
   turn = 0;
@@ -44,6 +45,7 @@ export class EdgeCache {
     this.routing = null;
     this.token = null;
     this.codexToken = null;
+    this.logins.clear();
   }
 }
 
@@ -136,6 +138,18 @@ async function codexAccess(config: AppConfig): Promise<{ token: string; accountI
   const accountId = result.accountId ?? "";
   config.cache.codexToken = { value: result.accessToken, name: result.name ?? "", accountId, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS };
   return { token: result.accessToken, accountId };
+}
+
+// A login's token and where its requests go, kept fresh by the Durable Object.
+async function loginAccess(config: AppConfig, provider: ServedLogin): Promise<{ token: string; endpoint: string } | { status: number; message: string }> {
+  const cached = config.cache.logins.get(provider);
+  const now = config.nowSeconds();
+  if (cached !== undefined && cached.cachedUntil > now && cached.expiresAt - now > REFRESH_MARGIN_SECONDS) return { token: cached.value, endpoint: cached.endpoint };
+  const result = await config.backend.loginToken(provider);
+  if (!result.ok) return { status: result.status, message: result.message };
+  const endpoint = result.endpoint ?? "";
+  config.cache.logins.set(provider, { value: result.accessToken, name: result.name ?? "", endpoint, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS });
+  return { token: result.accessToken, endpoint };
 }
 
 // Fields the ChatGPT Codex endpoint refuses, which other Responses clients may send (as CPA strips).
@@ -305,11 +319,19 @@ const RETRY_STATUSES = new Set([401, 403, 408, 429, 500, 502, 503, 504, 529]);
 const MAX_ATTEMPTS = 3;
 const CLAUDE_LOGIN_ID = "claude-login";
 const CODEX_LOGIN_ID = "codex-login";
+// Logins served like an API key of their provider, once their endpoint and token are known.
+const SERVED_LOGIN_IDS = new Map<string, ServedLogin>([["vertex-login", "vertex"]]);
 
-function loginCandidate(kind: "claude" | "codex", model: string): Candidate {
-  const id = kind === "claude" ? CLAUDE_LOGIN_ID : CODEX_LOGIN_ID;
-  const baseUrl = kind === "claude" ? UPSTREAM : CODEX_UPSTREAM;
+function loginCandidate(kind: "claude" | "codex" | ServedLogin, model: string): Candidate {
+  const id = kind === "claude" ? CLAUDE_LOGIN_ID : kind === "codex" ? CODEX_LOGIN_ID : `${kind}-login`;
+  const baseUrl = kind === "claude" ? UPSTREAM : kind === "codex" ? CODEX_UPSTREAM : "";
   return { model, credential: { id, kind, group: "oauth", baseUrl, apiKey: "", weight: 1, priority: 0, prefix: "", headers: {}, models: [], excluded: [] } };
+}
+
+async function servedLogin(config: AppConfig, candidate: Candidate, provider: ServedLogin): Promise<{ candidate: Candidate; token: string } | { status: number; message: string }> {
+  const access = await loginAccess(config, provider);
+  if (!("token" in access)) return access;
+  return { token: access.token, candidate: { ...candidate, credential: { ...candidate.credential, baseUrl: access.endpoint, headers: { authorization: `Bearer ${access.token}` } } } };
 }
 
 // Most clients put "model" first. Then it is read and replaced in place, without parsing the
@@ -354,13 +376,18 @@ function noteAttempt(trace: Trace, config: AppConfig, candidate: Candidate, stat
   let key: string | null = apiKeyKey(candidate.credential);
   if (candidate.credential.id === CLAUDE_LOGIN_ID) key = config.cache.token?.name ? loginKey(config.cache.token.name) : null;
   else if (candidate.credential.id === CODEX_LOGIN_ID) key = config.cache.codexToken?.name ? loginKey(config.cache.codexToken.name) : null;
+  else {
+    const served = SERVED_LOGIN_IDS.get(candidate.credential.id);
+    const name = served === undefined ? "" : (config.cache.logins.get(served)?.name ?? "");
+    if (served !== undefined) key = name === "" ? null : loginKey(name);
+  }
   if (key !== null) trace.attempts.push({ key, ok: status < 400 });
 }
 
 async function proxied(request: Request, url: URL, route: Route & { format: Format }, config: AppConfig, trace: Trace): Promise<Response> {
   const table = await routingTable(config);
   // Claude clients with only Claude logins configured: stream the body through unread.
-  if (route.format === "claude" && !table.codexOAuth && !table.credentials.some((credential) => servable("claude", credential.kind))) {
+  if (route.format === "claude" && !table.codexOAuth && !table.vertexOAuth && !table.credentials.some((credential) => servable("claude", credential.kind))) {
     const response = await viaClaudeLogin(request, url, config);
     noteAttempt(trace, config, loginCandidate("claude", ""), response.status);
     return response;
@@ -379,6 +406,8 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   if (route.format === "openai-response" && table.codexOAuth && (inDefaultFamily("codex", model) || usable.length === 0)) usable.push(loginCandidate("codex", model));
   // Claude Code asking for a ChatGPT model by name, e.g. ANTHROPIC_MODEL=gpt-5.6-sol.
   if (route.format === "claude" && table.codexOAuth && inDefaultFamily("codex", model)) usable.push(loginCandidate("codex", model));
+  // Vertex service accounts take Gemini models, from Gemini clients and translated Claude ones.
+  if ((route.format === "gemini" || route.format === "claude") && table.vertexOAuth === true && inDefaultFamily("vertex", model)) usable.push(loginCandidate("vertex", model));
   if (usable.length === 0) {
     if (route.format === "claude" && table.claudeOAuth) {
       const response = await viaClaudeLogin(request, url, config, text);
@@ -397,8 +426,27 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   config.cache.turn += 1;
   const attempts = ordered(usable, config.cache.turn).slice(0, MAX_ATTEMPTS);
   let last: Response | null = null;
-  for (const [index, candidate] of attempts.entries()) {
+  for (const [index, attempt] of attempts.entries()) {
     const isLast = index === attempts.length - 1;
+    let candidate = attempt;
+    let loginToken = "";
+    const served = SERVED_LOGIN_IDS.get(attempt.credential.id);
+    if (served !== undefined) {
+      const resolved = await servedLogin(config, attempt, served);
+      if (!("token" in resolved)) {
+        if (isLast) return formatError(route.format, resolved.status, "api_error", resolved.message);
+        last = new Response(null, { status: resolved.status });
+        continue;
+      }
+      candidate = resolved.candidate;
+      loginToken = resolved.token;
+    }
+    // The provider refused a login's token: the Durable Object gets a new one, at most once a minute.
+    const refused = async (status: number) => {
+      if (status !== 401 || served === undefined) return;
+      config.cache.logins.delete(served);
+      await config.backend.invalidate(loginToken);
+    };
     const body = parsed === null || candidate.model === model ? text : parsed.withModel(candidate.model);
     const translated = !takesNatively(candidate.credential.kind, route.format);
     if (translated || candidate.credential.id === CLAUDE_LOGIN_ID || candidate.credential.id === CODEX_LOGIN_ID) {
@@ -408,6 +456,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
       else if (candidate.credential.id === CLAUDE_LOGIN_ID) response = await viaClaudeLogin(request, url, config, body);
       else response = await viaCodexLogin(request, url, config, body);
       noteAttempt(trace, config, candidate, response.status);
+      await refused(response.status);
       if (isLast || !RETRY_STATUSES.has(response.status)) return response;
       await response.body?.cancel();
       last = new Response(null, { status: response.status });
@@ -415,6 +464,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
     }
     const upstream = await config.upstream(providerRequest(request, url, route, candidate.credential, candidate.model, body)).catch(() => null);
     noteAttempt(trace, config, candidate, upstream?.status ?? 502);
+    await refused(upstream?.status ?? 502);
     if (upstream !== null && (isLast || !RETRY_STATUSES.has(upstream.status))) return downstreamResponse(upstream);
     if (upstream !== null) {
       await upstream.body?.cancel();

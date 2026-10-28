@@ -1,8 +1,10 @@
-import { LOGIN_PROVIDERS, type Account, type LoginProvider } from "./account.ts";
+import { LOGIN_PROVIDERS, type Account, type OAuthProvider } from "./account.ts";
+import { OAuthError } from "./claude-oauth.ts";
 import { Config, ConfigError, configTag, ifMatchSatisfied } from "./config.ts";
 import { codexChannel, definition, definitionChannel, type Catalog } from "./models.ts";
 import { apiKeyKey, apiKeyProvider, loginKey, storedKey, type UsageStats } from "./usage.ts";
 import type { CredentialFile } from "./vault.ts";
+import { serviceAccountOf, signingKey, validLocation, vertexFileData, vertexFileName } from "./vertex-auth.ts";
 
 // CPA's v8 management API (the subset the official dashboard uses), answered from the Durable
 // Object. Paths and response shapes follow CPA's handlers so the same dashboard works on both
@@ -11,7 +13,7 @@ import type { CredentialFile } from "./vault.ts";
 export const MANAGEMENT_PREFIX = "/v8/management";
 export const GATEWAY_VERSION = "sub2api-free";
 // CPA's provider names and their aliases.
-const OAUTH_ALIASES: Record<string, LoginProvider> = { claude: "claude", anthropic: "claude", codex: "codex", openai: "codex" };
+const OAUTH_ALIASES: Record<string, OAuthProvider> = { claude: "claude", anthropic: "claude", codex: "codex", openai: "codex" };
 
 function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } });
@@ -266,6 +268,37 @@ function fileModel(model: { id: string; display_name?: string; type?: string; ow
   return { id: model.id, ...(model.display_name === undefined ? {} : { display_name: model.display_name }), ...(model.type === undefined ? {} : { type: model.type }), ...(model.owned_by === undefined ? {} : { owned_by: model.owned_by }) };
 }
 
+// Service account key files are a few KB; anything much larger isn't one.
+const MAX_SERVICE_ACCOUNT_BYTES = 64 * 1024;
+
+// CPA's Vertex import: a service account key file, stored as a vertex auth file.
+async function importVertex(request: Request, url: URL, account: Account): Promise<Response> {
+  const form = await request.formData().catch(() => null);
+  const file = form?.get("file");
+  if (file === null || file === undefined || typeof file === "string") return failure(400, "file required");
+  if (file.size > MAX_SERVICE_ACCOUNT_BYTES) return failure(400, "invalid service account", { message: "file too large" });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await file.text());
+  } catch {
+    return failure(400, "invalid json");
+  }
+  const serviceAccount = serviceAccountOf(parsed);
+  if (serviceAccount === null) return failure(400, "invalid service account", { message: "service account missing client_email or private_key" });
+  try {
+    await signingKey(serviceAccount);
+  } catch (error) {
+    return failure(400, "invalid service account", { message: error instanceof OAuthError ? error.message : "private_key can't be read" });
+  }
+  if (serviceAccount.projectId === "") return failure(400, "project_id missing");
+  const formLocation = form?.get("location");
+  const location = (typeof formLocation === "string" ? formLocation.trim() : "") || url.searchParams.get("location")?.trim() || "us-central1";
+  if (!validLocation(location)) return failure(400, "invalid location");
+  const name = vertexFileName(serviceAccount.projectId);
+  account.vault.saveCredentialFile(name, "vertex", vertexFileData(parsed as Record<string, unknown>, location), account.nowSeconds());
+  return json({ status: "ok", "auth-file": name, project_id: serviceAccount.projectId, email: serviceAccount.clientEmail, location });
+}
+
 async function oauthRoute(request: Request, url: URL, action: string, account: Account): Promise<Response> {
   switch (`${request.method} ${action}`) {
     case "GET auth-url":
@@ -282,6 +315,12 @@ async function oauthRoute(request: Request, url: URL, action: string, account: A
       if (login === undefined) return failure(404, "provider_not_found");
       const { url: authUrl, state } = await account.startLogin(login);
       return json({ status: "ok", url: authUrl, state });
+    }
+    case "POST import": {
+      const provider = url.searchParams.get("provider")?.trim().toLowerCase() ?? "";
+      if (provider === "") return failure(400, "provider is required");
+      if (provider !== "vertex") return failure(404, "provider_not_found");
+      return importVertex(request, url, account);
     }
     case "GET status": {
       const state = url.searchParams.get("state")?.trim() ?? "";
