@@ -7,10 +7,17 @@
 
 Two ways to install. Both are free and open source, with the same dashboard; sub2api never charges you anything. Pick by the Cloudflare plan you already have:
 
-| Install | Your Cloudflare plan | What runs | Deploy |
-|---|---|---|---|
-| **Container** | Workers Paid (Cloudflare bills $5/month; Containers need it) | The latest CPA release in a container, with its official dashboard | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api) |
-| **Workers-only** | Workers Free | Our container-free TypeScript rewrite of CPA with CPA's own dashboard (Claude subscriptions today, more CPA features coming) | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free) |
+### Container
+
+For **Workers Paid** (Cloudflare bills $5/month; Containers need it). Runs the latest CPA release in a container, with its official dashboard.
+
+<a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy the Container install to Cloudflare" width="320"></a>
+
+### Workers-only
+
+For **Workers Free**. Runs our container-free TypeScript rewrite of CPA with CPA's own dashboard: Claude and ChatGPT logins, API keys for Claude, Gemini, Codex and OpenAI-compatible providers, and translation between their formats. See [free/README.md](free/README.md).
+
+<a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy the Workers-only install to Cloudflare" width="320"></a>
 
 ## Why
 
