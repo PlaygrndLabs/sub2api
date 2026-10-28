@@ -309,8 +309,8 @@ describe("API-key providers", () => {
     const unknown = await handle(post("/v1/chat/completions", { model: "nothing" }), config);
     expect(unknown.status).toBe(400);
     expect(await unknown.json()).toMatchObject({ error: { type: "invalid_request_error", message: expect.stringMatching(/No provider is configured for model nothing/) } });
-    const wrongShape = await handle(post("/v1/chat/completions", { model: "gemini-2.5-flash" }), config);
-    expect(await wrongShape.json()).toMatchObject({ error: { message: expect.stringMatching(/gemini provider, which doesn't take this request format yet/) } });
+    const wrongShape = await handle(at(`/v1beta/models/kimi:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(await wrongShape.json()).toMatchObject({ error: { message: expect.stringMatching(/openai-compatibility provider, which doesn.t take this request format yet/) } });
     backend.table = { ...backend.table, claudeOAuth: false };
     config.cache.forgetConfig();
     expect((await handle(post("/v1/messages", { model: "x" }), config)).status).toBe(400);
@@ -737,6 +737,15 @@ describe("Claude Code on ChatGPT logins and Codex keys", () => {
     expect(seen).toHaveLength(1);
   });
 
+  it("serves an OpenAI Chat client from a ChatGPT login, through Claude Messages", async () => {
+    const { config, seen } = await loginSetup();
+    const response = await handle(post("/v1/chat/completions", { model: "gpt-5.6-sol", messages: [{ role: "user", content: "hi" }] }), config);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ object: "chat.completion", model: "gpt-5.6-sol", choices: [{ message: { content: "Hi" }, finish_reason: "stop" }] });
+    expect(seen[0]?.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+    expect(await seen[0]?.json()).toMatchObject({ model: "gpt-5.6-sol", stream: true, input: [{ type: "message", role: "user" }] });
+  });
+
   it("translates a 600 KB Claude Code request within the CPU budget", async () => {
     const history = Array.from({ length: 400 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: [{ type: "text", text: "x".repeat(1500) }] }));
     const tools = Array.from({ length: 30 }, (_, index) => ({ name: `tool_${index}`, description: "d".repeat(300), input_schema: { type: "object", properties: { a: { type: "string" } } } }));
@@ -751,5 +760,63 @@ describe("Claude Code on ChatGPT logins and Codex keys", () => {
     // Parsing, translating and re-serialising is the costliest path the gateway has (about 6 ms
     // here), so this gate leaves CI machines some room while still catching a regression.
     expect(gateway).toBeLessThan(9);
+  });
+});
+
+describe("OpenAI Responses clients on other providers", () => {
+  const claudeEvents = (events: unknown[]) =>
+    new Response(events.map((event) => `event: x\ndata: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+  const claudeAnswer = () =>
+    claudeEvents([
+      { type: "message_start", message: { id: "msg_1", usage: { input_tokens: 4, cache_read_input_tokens: 2 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hi" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "toolu_1", name: "fs_read", input: {} } },
+      { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"path":"a"}' } },
+      { type: "content_block_stop", index: 1 },
+      { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 3 } },
+      { type: "message_stop" },
+    ]);
+
+  it("serves a Responses client from a Claude API key, streamed and whole", async () => {
+    const { config, seen } = await providersSetup(async (request) =>
+      (await request.clone().json() as { stream?: boolean }).stream
+        ? claudeAnswer()
+        : Response.json({ id: "msg_2", content: [{ type: "text", text: "Hello" }], stop_reason: "max_tokens", usage: { input_tokens: 4, output_tokens: 9 } }),
+    );
+    const body = { model: "work/claude-sonnet-5-5", stream: true, instructions: "Be brief.", input: "hi", tools: [{ type: "function", name: "fs.read", parameters: { type: "object", properties: { path: { type: "string" } } } }] };
+    const streamed = await handle(post("/v1/responses", body), config);
+    expect(streamed.headers.get("content-type")).toMatch(/^text\/event-stream/);
+    const text = await streamed.text();
+    expect(text).toContain('"type":"response.output_text.delta"');
+    expect(text).toContain('"name":"fs.read","arguments":"{\\"path\\":\\"a\\"}"');
+    expect(text).toContain('event: response.completed');
+    expect(text).toContain('"input_tokens":6,"input_tokens_details":{"cached_tokens":2}');
+    const [sent] = seen;
+    expect(sent?.url).toBe("https://api.anthropic.com/v1/messages");
+    expect(sent?.headers.get("x-api-key")).toBe("sk-ant-1");
+    expect(sent?.headers.get("authorization")).toBeNull();
+    expect(await sent?.json()).toMatchObject({ model: "claude-sonnet-5-5", system: [{ type: "text", text: "Be brief." }], messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }], tools: [{ name: "fs_read" }] });
+    const whole = await handle(post("/v1/responses", { model: "work/claude-sonnet-5-5", input: "hi" }), config);
+    expect(await whole.json()).toMatchObject({ object: "response", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [{ type: "message", content: [{ type: "output_text", text: "Hello" }] }] });
+  });
+
+  it("serves a Responses client from an OpenAI-compatible key, through Claude Messages", async () => {
+    const chat = () => new Response(`data: ${JSON.stringify({ id: "chatcmpl-1", choices: [{ delta: { content: "Hi" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } });
+    const { config, seen } = await providersSetup(async () => chat());
+    const response = await handle(post("/v1/responses", { model: "kimi", stream: true, input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }] }), config);
+    const text = await response.text();
+    expect(text).toContain('"delta":"Hi"');
+    expect(text).toContain("event: response.completed");
+    expect(seen[0]?.url).toBe("https://router.example/api/v1/chat/completions");
+    expect(await seen[0]?.json()).toMatchObject({ model: "vendor/kimi-k2:free", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] });
+  });
+
+  it("returns upstream errors in the Responses shape", async () => {
+    const { config } = await providersSetup(async () => Response.json({ type: "error", error: { type: "overloaded_error", message: "Overloaded" } }, { status: 400 }));
+    const response = await handle(post("/v1/responses", { model: "work/claude-sonnet-5-5", input: "hi" }), config);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: { message: "Overloaded", type: "api_error", code: null } });
   });
 });
