@@ -5,15 +5,27 @@ import { CatalogCache } from "./models.ts";
 import { flagOf, retryOf, upstreamCredentials, weightOf, type LoginEntry, type RoutingTable, type UpstreamCredential } from "./providers.ts";
 import { routingSettings, type CooldownEvent, type RoutingSettings } from "./routing.ts";
 import { storedKey, type UsageRecord } from "./usage.ts";
+import * as kimi from "./kimi-oauth.ts";
 import { claudeCredential, claudeFileData, type CredentialFile, type LoginSession, type Vault } from "./vault.ts";
+import { mintToken, vertexLogin, vertexModelsUrl } from "./vertex-auth.ts";
 
-// `name` is the login file the token belongs to, for its usage counts.
-export type TokenResult = { ok: true; accessToken: string; expiresAt: number; accountId?: string; name?: string } | { ok: false; status: number; message: string };
+// `name` is the login file the token belongs to, for its usage counts. `endpoint` is where the
+// login's requests go (a Vertex project and location, or a Kimi domain), and `headers` any it
+// must send with them.
+export type TokenResult =
+  | { ok: true; accessToken: string; expiresAt: number; accountId?: string; endpoint?: string; headers?: Record<string, string>; name?: string }
+  | { ok: false; status: number; message: string };
 
-// The subscription logins the gateway signs in to and keeps fresh.
-export type LoginProvider = "claude" | "codex";
-export const LOGIN_PROVIDERS: readonly LoginProvider[] = ["claude", "codex"];
-const LABEL: Record<LoginProvider, string> = { claude: "Claude", codex: "ChatGPT (Codex)" };
+// The logins the gateway keeps fresh: subscriptions signed in to from the dashboard, and Vertex
+// service accounts imported there.
+export type LoginProvider = "claude" | "codex" | "kimi" | "vertex";
+export type OAuthProvider = Exclude<LoginProvider, "vertex">;
+// Logins the Worker serves like an API key of their provider, with a token and an endpoint.
+export type ServedLogin = "kimi" | "vertex";
+export const LOGIN_PROVIDERS: readonly LoginProvider[] = ["claude", "codex", "kimi", "vertex"];
+const LABEL: Record<LoginProvider, string> = { claude: "Claude", codex: "ChatGPT (Codex)", kimi: "Kimi", vertex: "Vertex AI" };
+// CPA names Kimi.ai logins "kimi-ai"; they are Kimi logins on the other domain.
+const PROVIDER_OF_FILE: Record<string, LoginProvider> = { "kimi-ai": "kimi" };
 
 // Everything the Worker asks of the Durable Object. The Durable Object is one instance, so the
 // state below (config, token refreshes, login sessions) is never raced by another copy.
@@ -22,12 +34,22 @@ export interface Backend {
   // A login's token by its file name, or, with no name, the next login's in turn.
   token(name?: string): Promise<TokenResult>;
   codexToken(name?: string): Promise<TokenResult>;
+  loginToken(provider: ServedLogin): Promise<TokenResult>;
   invalidate(accessToken: string): Promise<void>;
   attemptAllowed(client: string): Promise<boolean>;
   manage(request: Request): Promise<Response>;
   routing(): Promise<RoutingTable>;
   record(records: UsageRecord[]): Promise<void>;
   cool(events: CooldownEvent[]): Promise<void>;
+}
+
+// A Kimi device login waiting for approval, kept in its session row.
+interface KimiFlow {
+  readonly deviceCode: string;
+  readonly deviceId: string;
+  readonly domain: kimi.KimiDomain;
+  readonly interval: number;
+  readonly expiresAt: number;
 }
 
 export const REFRESH_MARGIN_SECONDS = 5 * 60;
@@ -38,6 +60,8 @@ interface Login {
   readonly refreshToken: string;
   readonly expiresAt: number;
   readonly accountId: string;
+  readonly endpoint?: string;
+  readonly headers?: Record<string, string>;
 }
 
 function textOf(value: unknown): string {
@@ -65,6 +89,14 @@ function loginEntry(file: CredentialFile): LoginEntry {
 
 function loginOf(file: CredentialFile): Login | null {
   if (file.provider === "codex") return codex.codexCredential(file.data);
+  if (file.provider === "kimi" || file.provider === "kimi-ai") {
+    const login = kimi.kimiLogin(file.data);
+    return login === null ? null : { accessToken: login.accessToken, refreshToken: login.refreshToken, expiresAt: login.expiresAt, accountId: "", endpoint: kimi.apiBase(login.domain), headers: kimi.identityHeaders(login.deviceId) };
+  }
+  if (file.provider === "vertex") {
+    const login = vertexLogin(file.data);
+    return login === null ? null : { accessToken: login.accessToken, refreshToken: "", expiresAt: login.expiresAt, accountId: "", endpoint: vertexModelsUrl(login) };
+  }
   const credential = claudeCredential(file.data);
   return credential === null ? null : { ...credential, accountId: "" };
 }
@@ -84,6 +116,7 @@ export class Account {
   private readonly next = new Map<LoginProvider, number>();
   // CPA's model catalog, for the dashboard's model lists.
   readonly catalog = new CatalogCache();
+  private readonly nextPoll = new Map<string, number>();
 
   constructor(
     readonly vault: Vault,
@@ -112,7 +145,8 @@ export class Account {
     const tree = this.currentConfig().read([]);
     this.upstreams ??= upstreamCredentials(tree);
     this.settings ??= routingSettings(tree);
-    const files = LOGIN_PROVIDERS.flatMap((provider) => this.loginFiles(provider));
+    // Claude and ChatGPT logins are routed one by one; Kimi and Vertex still take turns in the Durable Object.
+    const files = (["claude", "codex"] as const).flatMap((provider) => this.loginFiles(provider));
     const logins = files.map(loginEntry);
     const codexPlans = files.filter((file) => file.provider === "codex").map((file) => (typeof file.data.plan_type === "string" ? file.data.plan_type : ""));
     return {
@@ -120,6 +154,8 @@ export class Account {
       claudeOAuth: logins.some((login) => login.provider === "claude"),
       codexOAuth: logins.some((login) => login.provider === "codex"),
       codexPlans,
+      vertexOAuth: this.loginFiles("vertex").length > 0,
+      kimiOAuth: this.loginFiles("kimi").length > 0,
       logins,
       settings: this.settings,
       cooldowns: this.vault.cooldowns(this.nowSeconds()),
@@ -149,7 +185,7 @@ export class Account {
   }
 
   loginFiles(provider: LoginProvider): CredentialFile[] {
-    return this.vault.credentialFiles().filter((file) => file.provider === provider && !file.disabled);
+    return this.vault.credentialFiles().filter((file) => (PROVIDER_OF_FILE[file.provider] ?? file.provider) === provider && !file.disabled);
   }
 
   claudeFiles(): CredentialFile[] {
@@ -181,7 +217,7 @@ export class Account {
 
   async tokenFor(file: CredentialFile, force = false): Promise<TokenResult> {
     const current = loginOf(file);
-    if (current === null) return { ok: false, status: 503, message: `The login ${file.name} has no tokens: sign in again.` };
+    if (current === null) return { ok: false, status: 503, message: file.provider === "vertex" ? `The Vertex file ${file.name} has no usable service account: import it again.` : `The login ${file.name} has no tokens: sign in again.` };
     if (!force && current.expiresAt - this.nowSeconds() > REFRESH_MARGIN_SECONDS) return granted(current, file.name);
     let pending = this.refreshing.get(file.name);
     if (pending === undefined) {
@@ -222,8 +258,17 @@ export class Account {
     return this.vault.attemptAllowed(client, this.nowSeconds());
   }
 
-  async startLogin(provider: LoginProvider): Promise<{ url: string; state: string }> {
+  async startLogin(provider: OAuthProvider, domain = ""): Promise<{ url: string; state: string; userCode?: string; expiresIn?: number }> {
     const state = randomToken(32);
+    if (provider === "kimi") {
+      // A device flow: the dashboard opens Kimi's page, and polling the status finishes it.
+      const kimiDomain = kimi.kimiDomain(domain);
+      const deviceId = crypto.randomUUID();
+      const device = await kimi.startDevice(this.fetcher, kimiDomain, deviceId);
+      const flow: KimiFlow = { deviceCode: device.deviceCode, deviceId, domain: kimiDomain, interval: device.interval, expiresAt: this.nowSeconds() + device.expiresIn };
+      this.vault.saveSession({ state, provider, verifier: JSON.stringify(flow), createdAt: this.nowSeconds(), status: "wait", error: "" }, this.nowSeconds());
+      return { url: device.url, state, ...(device.userCode === "" ? {} : { userCode: device.userCode }), expiresIn: device.expiresIn };
+    }
     const verifier = randomToken(96);
     this.vault.saveSession({ state, provider, verifier, createdAt: this.nowSeconds(), status: "wait", error: "" }, this.nowSeconds());
     return { url: provider === "codex" ? await codex.authorizeUrl(state, verifier) : await authorizeUrl(state, verifier), state };
@@ -233,12 +278,41 @@ export class Account {
     return this.vault.session(state, this.nowSeconds());
   }
 
+  // Asks Kimi once whether a device login was approved, no sooner than Kimi's interval allows.
+  async pollDevice(session: LoginSession): Promise<LoginSession> {
+    if (session.provider !== "kimi" || session.status !== "wait") return session;
+    let flow: KimiFlow;
+    try {
+      flow = JSON.parse(session.verifier) as KimiFlow;
+    } catch {
+      return session;
+    }
+    const now = this.nowSeconds();
+    if (now < (this.nextPoll.get(session.state) ?? 0)) return session;
+    this.nextPoll.set(session.state, now + flow.interval);
+    const save = (next: LoginSession) => {
+      this.vault.saveSession(next, now);
+      return next;
+    };
+    if (now > flow.expiresAt) return save({ ...session, status: "error", error: "Authentication failed: the Kimi code expired" });
+    const result = await kimi.pollDevice(this.fetcher, flow.domain, flow.deviceId, flow.deviceCode, flow.interval, now).catch((): kimi.PollResult => ({ status: "wait" }));
+    if (result.status === "wait") {
+      if (result.interval !== undefined) save({ ...session, verifier: JSON.stringify({ ...flow, interval: result.interval }) });
+      return session;
+    }
+    if (result.status === "error") return save({ ...session, status: "error", error: result.message });
+    this.vault.saveCredentialFile(`${flow.domain === "kimi.ai" ? "kimi-ai" : "kimi"}-${now * 1000}.json`, flow.domain === "kimi.ai" ? "kimi-ai" : "kimi", kimi.kimiFileData(result.token, flow.domain, flow.deviceId), now);
+    this.nextPoll.delete(session.state);
+    return save({ ...session, status: "ok", error: "" });
+  }
+
   // Exchanges the code right away, so the session is finished by the time the dashboard polls.
   async finishLogin(state: string, code: string, error: string): Promise<{ status: number; error?: string }> {
     const session = this.session(state);
     if (session === null) return { status: 404, error: "unknown or expired state" };
     if (session.status === "ok") return { status: 409, error: "oauth flow is already completed" };
     if (session.status === "error") return { status: 409, error: session.error || "oauth flow failed" };
+    if (session.provider === "kimi") return { status: 400, error: "Kimi logins finish on Kimi's page, without a callback" };
     const finish = (status: "ok" | "error", message = "") => this.vault.saveSession({ ...session, status, error: message }, this.nowSeconds());
     if (error !== "") {
       finish("error", "Bad request");
@@ -271,10 +345,23 @@ export class Account {
   }
 
   private async refresh(file: CredentialFile, current: Login): Promise<TokenResult> {
-    const label = file.provider === "codex" ? LABEL.codex : LABEL.claude;
+    const provider = PROVIDER_OF_FILE[file.provider] ?? file.provider;
+    const label = Object.hasOwn(LABEL, provider) ? LABEL[provider as LoginProvider] : file.provider;
     try {
       let next: Login;
-      if (file.provider === "codex") {
+      if (file.provider === "kimi" || file.provider === "kimi-ai") {
+        const login = kimi.kimiLogin(file.data);
+        if (login === null || login.refreshToken === "") throw new OAuthError("the login has no refresh token", 401);
+        const refreshed = await kimi.refresh(this.fetcher, login.domain, login.deviceId, login.refreshToken, this.nowSeconds());
+        this.vault.saveCredentialFile(file.name, file.provider, { ...file.data, ...kimi.kimiFileData(refreshed, login.domain, login.deviceId), type: file.provider }, this.nowSeconds());
+        next = { ...current, accessToken: refreshed.accessToken, refreshToken: refreshed.refreshToken, expiresAt: refreshed.expiresAt };
+      } else if (file.provider === "vertex") {
+        const login = vertexLogin(file.data);
+        if (login === null) throw new OAuthError("the file has no usable service account", 400);
+        const minted = await mintToken(this.fetcher, login.account, this.nowSeconds());
+        this.vault.saveCredentialFile(file.name, file.provider, { ...file.data, access_token: minted.accessToken, expired: new Date(minted.expiresAt * 1000).toISOString() }, this.nowSeconds());
+        next = { ...current, ...minted };
+      } else if (file.provider === "codex") {
         const refreshed = await codex.refresh(this.fetcher, codex.codexCredential(file.data) as codex.CodexCredential, this.nowSeconds());
         this.vault.saveCredentialFile(file.name, file.provider, { ...file.data, ...codex.codexFileData(refreshed) }, this.nowSeconds());
         next = refreshed;
@@ -288,7 +375,8 @@ export class Account {
     } catch (error) {
       if (error instanceof OAuthError && (error.status === 400 || error.status === 401)) {
         this.vault.setCredentialStatus(file.name, false, "token expired", this.nowSeconds());
-        return { ok: false, status: 503, message: `The ${label} login has expired: sign in again under OAuth login in the dashboard.` };
+        const message = file.provider === "vertex" ? `Google refused the Vertex service account ${file.name}: check its key and roles, then import it again.` : `The ${label} login has expired: sign in again under OAuth login in the dashboard.`;
+        return { ok: false, status: 503, message };
       }
       // A token that hasn't actually expired yet is still worth using.
       if (current.expiresAt > this.nowSeconds()) return granted(current, file.name);
@@ -299,6 +387,6 @@ export class Account {
 }
 
 function granted(login: Login, name: string): TokenResult {
-  const result = { ok: true as const, accessToken: login.accessToken, expiresAt: login.expiresAt, name };
+  const result = { ok: true as const, accessToken: login.accessToken, expiresAt: login.expiresAt, name, ...(login.endpoint === undefined ? {} : { endpoint: login.endpoint }), ...(login.headers === undefined ? {} : { headers: login.headers }) };
   return login.accountId === "" ? result : { ...result, accountId: login.accountId };
 }

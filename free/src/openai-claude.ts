@@ -3,8 +3,8 @@ import { isObject, text, type EventTranslator, type Json } from "./claude-respon
 // Translation between OpenAI Chat Completions clients and Anthropic Messages, for Claude API
 // keys, ported from CPA's translator/claude/openai/chat-completions.
 
-const DEFAULT_MAX_TOKENS = 32000;
-const FABLE_MAX_TOKENS = 64000;
+export const DEFAULT_MAX_TOKENS = 32000;
+export const FABLE_MAX_TOKENS = 64000;
 // Claude 4.5 and older take a thinking budget; newer models think adaptively at an effort.
 const BUDGET_THINKING = /^claude-(?:3|(?:opus|sonnet|haiku)-4(?:-[0-5])?(?:-\d{8})?$|(?:opus|sonnet|haiku)-4-[0-5]-)/i;
 const EFFORT_BUDGET: Record<string, number> = { minimal: 512, low: 1024, medium: 8192, high: 24576, xhigh: 32768, max: 128000 };
@@ -15,15 +15,15 @@ export function claudeName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "_";
 }
 
-function toolId(id: string): string {
+export function toolId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_") || `toolu_${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`;
 }
 
-function withCache(block: Json, from: Json): Json {
+export function withCache(block: Json, from: Json): Json {
   return isObject(from.cache_control) ? { ...block, cache_control: from.cache_control } : block;
 }
 
-function dataUrl(url: string): { mediaType: string; data: string } | null {
+export function dataUrl(url: string): { mediaType: string; data: string } | null {
   if (!url.startsWith("data:")) return null;
   const comma = url.indexOf(",");
   if (comma === -1) return null;
@@ -64,7 +64,7 @@ function toolResultContent(content: unknown): string | Json[] {
 }
 
 // Structured output has no Claude field, so CPA asks for it in the system prompt.
-function formatInstruction(format: unknown): string {
+export function formatInstruction(format: unknown): string {
   if (!isObject(format)) return "";
   const plain = "You must format your entire response as a valid JSON object. Do not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object.";
   const type = text(format.type).trim().toLowerCase();
@@ -83,7 +83,7 @@ function formatInstruction(format: unknown): string {
 }
 
 // Claude wants an object schema without a root-level union: object branches are merged in.
-function inputSchema(raw: unknown): Json {
+export function inputSchema(raw: unknown): Json {
   if (!isObject(raw)) return { type: "object", properties: {} };
   const { anyOf, oneOf, allOf, ...schema } = raw;
   const properties: Json = isObject(schema.properties) ? { ...schema.properties } : {};
@@ -102,7 +102,7 @@ function inputSchema(raw: unknown): Json {
   return { ...schema, type: "object", properties };
 }
 
-function thinking(effort: string, model: string, maxTokens: number): Json | null {
+export function thinking(effort: string, model: string, maxTokens: number): Json | null {
   if (effort === "") return null;
   if (effort === "none") return { thinking: { type: "disabled" } };
   if (!BUDGET_THINKING.test(model)) {
@@ -281,7 +281,7 @@ function finishReason(stop: string): string {
   return "stop";
 }
 
-interface Usage {
+export interface Usage {
   input: number;
   output: number;
   cacheWrite: number;
@@ -289,7 +289,7 @@ interface Usage {
   thinking: number | null;
 }
 
-function mergeUsage(usage: Usage, raw: unknown): boolean {
+export function mergeUsage(usage: Usage, raw: unknown): boolean {
   if (!isObject(raw)) return false;
   const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
   usage.input = number(raw.input_tokens) ?? usage.input;

@@ -20,7 +20,7 @@ const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+/-]{0,199}$/;
 const CLAUDE_MAX_INPUT_TOKENS = 200_000;
 const CLAUDE_MAX_OUTPUT_TOKENS = 64_000;
 
-export const CHANNELS = ["claude", "gemini", "codex-free", "codex-team", "codex-plus", "codex-pro"] as const;
+export const CHANNELS = ["claude", "gemini", "codex-free", "codex-team", "codex-plus", "codex-pro", "xai", "vertex", "kimi"] as const;
 export type Channel = (typeof CHANNELS)[number];
 
 // One model as CPA's catalog describes it, with the fields the model lists use.
@@ -172,6 +172,13 @@ export function definitionChannel(name: string): Channel | null {
       return "gemini";
     case "codex":
       return "codex-pro";
+    case "xai":
+      return "xai";
+    case "vertex":
+      return "vertex";
+    case "kimi":
+    case "kimi-ai":
+      return "kimi";
     default:
       return null;
   }
@@ -181,6 +188,9 @@ const OWNER: Record<ProviderKind, { owned_by: string; type: string; channel: Cha
   claude: { owned_by: "anthropic", type: "claude", channel: "claude" },
   gemini: { owned_by: "google", type: "gemini", channel: "gemini" },
   codex: { owned_by: "openai", type: "openai", channel: "codex-pro" },
+  xai: { owned_by: "xai", type: "xai", channel: "xai" },
+  vertex: { owned_by: "google", type: "gemini", channel: "vertex" },
+  kimi: { owned_by: "moonshot", type: "kimi", channel: "kimi" },
   "openai-compatibility": { owned_by: "", type: "openai-compatibility", channel: null },
 };
 
@@ -213,6 +223,8 @@ export function availableModels(table: RoutingTable, catalog: Catalog, now: numb
     const plans = table.codexPlans === undefined || table.codexPlans.length === 0 ? [""] : table.codexPlans;
     for (const plan of plans) catalog[codexChannel(plan)].forEach(add);
   }
+  if (table.vertexOAuth === true) catalog.vertex.forEach(add);
+  if (table.kimiOAuth === true) catalog.kimi.forEach(add);
   for (const credential of table.credentials) {
     for (const model of credentialModels(credential, catalog, now)) {
       add(model);

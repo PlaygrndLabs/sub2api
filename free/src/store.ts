@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { Account, type Backend, type TokenResult } from "./account.ts";
+import { Account, type Backend, type ServedLogin, type TokenResult } from "./account.ts";
 import type { Env } from "./env.ts";
 import { handleManagement } from "./management.ts";
 import type { RoutingTable } from "./providers.ts";
@@ -27,6 +27,9 @@ export class Store extends DurableObject<Env> implements Backend {
   }
   codexToken(name?: string): Promise<TokenResult> {
     return this.account.codexToken(name);
+  }
+  loginToken(provider: ServedLogin): Promise<TokenResult> {
+    return this.account.loginToken(provider);
   }
   invalidate(accessToken: string): Promise<void> {
     return this.account.invalidate(accessToken);

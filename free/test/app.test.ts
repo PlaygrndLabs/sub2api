@@ -38,6 +38,13 @@ class FakeBackend implements Backend {
     if (name === undefined) return this.codexResult;
     return this.named[name] ?? { ok: true, accessToken: `chatgpt-${name}`, expiresAt: NOW + 3600, accountId: `acct-${name}`, name };
   }
+  vertexResult: TokenResult = { ok: true, accessToken: "ya29.vertex", expiresAt: NOW + 3600, endpoint: "https://us-central1-aiplatform.googleapis.com/v1/projects/p-1/locations/us-central1/publishers/google/models", name: "vertex-p-1.json" };
+  kimiResult: TokenResult = { ok: true, accessToken: "kimi-at", expiresAt: NOW + 3600, endpoint: "https://api.kimi.com/coding", headers: { "user-agent": "sub2api", "x-msh-platform": "sub2api", "x-msh-device-id": "dev-1" }, name: "kimi-1.json" };
+  async loginToken(provider: string) {
+    this.calls.push(`loginToken:${provider}`);
+    if (provider === "kimi") return this.kimiResult;
+    return this.vertexResult;
+  }
   async invalidate(accessToken: string) {
     this.invalidated.push(accessToken);
   }
@@ -326,8 +333,8 @@ describe("API-key providers", () => {
     const unknown = await handle(post("/v1/chat/completions", { model: "nothing" }), config);
     expect(unknown.status).toBe(400);
     expect(await unknown.json()).toMatchObject({ error: { type: "invalid_request_error", message: expect.stringMatching(/No provider is configured for model nothing/) } });
-    const wrongShape = await handle(post("/v1/chat/completions", { model: "gemini-2.5-flash" }), config);
-    expect(await wrongShape.json()).toMatchObject({ error: { message: expect.stringMatching(/gemini provider, which doesn't take this request format yet/) } });
+    const wrongShape = await handle(at(`/v1beta/models/kimi:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(await wrongShape.json()).toMatchObject({ error: { message: expect.stringMatching(/openai-compatibility provider, which doesn.t take this request format yet/) } });
     backend.table = { ...backend.table, claudeOAuth: false };
     config.cache.forgetConfig();
     expect((await handle(post("/v1/messages", { model: "x" }), config)).status).toBe(400);
@@ -379,6 +386,139 @@ describe("API-key providers", () => {
     backend.table = { credentials: [], claudeOAuth: false, codexOAuth: false };
     expect(await (await handle(at("/v1/models", { headers: { authorization: `Bearer ${KEY}` } }), config)).json()).toEqual({ object: "list", data: [] });
     expect(await (await handle(at("/v1/models", { headers: { "x-api-key": KEY, "anthropic-version": "2023-06-01" } }), config)).json()).toEqual({ data: [], has_more: false, first_id: "", last_id: "" });
+  });
+});
+
+describe("xAI keys", () => {
+  const XAI = { "api-keys": { xai: [{ name: "grok", keys: [{ "api-key": "xai-key-1" }] }] } };
+
+  async function xaiSetup() {
+    const fixture = await setup();
+    fixture.backend.table = { credentials: upstreamCredentials(XAI), claudeOAuth: true, codexOAuth: false };
+    return fixture;
+  }
+
+  it("defaults to xAI's API and serves Grok models", () => {
+    expect(upstreamCredentials(XAI).map((credential) => [credential.id, credential.baseUrl])).toEqual([["xai/grok/0", "https://api.x.ai/v1"]]);
+  });
+
+  it("sends Responses and Chat requests untranslated, each to its own endpoint", async () => {
+    const { config, seen } = await xaiSetup();
+    await handle(post("/v1/responses", { model: "grok-4.5", input: "hi" }), config);
+    await handle(post("/v1/chat/completions", { model: "grok-4.5", messages: [{ role: "user", content: "hi" }] }), config);
+    expect(seen.map((request) => request.url)).toEqual(["https://api.x.ai/v1/responses", "https://api.x.ai/v1/chat/completions"]);
+    expect(seen.map((request) => request.headers.get("authorization"))).toEqual(["Bearer xai-key-1", "Bearer xai-key-1"]);
+    expect(await seen[1]?.json()).toEqual({ model: "grok-4.5", messages: [{ role: "user", content: "hi" }] });
+  });
+
+  it("lists Grok models from CPA's catalog", async () => {
+    const { config } = await xaiSetup();
+    const listed = (await (await handle(at("/v1/models", { headers: { authorization: `Bearer ${KEY}` } }), config)).json()) as { data: { id: string; owned_by: string }[] };
+    expect(listed.data).toContainEqual(expect.objectContaining({ id: "grok-4.7", owned_by: "xai" }));
+  });
+
+  it("translates Claude Code requests to Responses", async () => {
+    const { config, seen } = await xaiSetup();
+    await handle(post("/v1/messages", { model: "grok-4.5", stream: true, max_tokens: 100, messages: [{ role: "user", content: "hi" }] }, { "anthropic-version": "2023-06-01" }), config);
+    expect(seen[0]?.url).toBe("https://api.x.ai/v1/responses");
+    expect(seen[0]?.headers.get("anthropic-version")).toBeNull();
+    expect(await seen[0]?.json()).toMatchObject({ model: "grok-4.5", stream: true, input: [{ role: "user" }] });
+  });
+});
+
+describe("Vertex", () => {
+  const VERTEX = {
+    "api-keys": {
+      vertex: [
+        { name: "v", keys: [{ "api-key": "vk-1" }] },
+        { name: "zen", prefix: "zen", "base-url": "https://zenmux.example/api/v1", models: [{ name: "gemini-2.5-pro" }], keys: [{ "api-key": "vk-2" }] },
+      ],
+    },
+  };
+  const ENDPOINT = "https://us-central1-aiplatform.googleapis.com/v1/projects/p-1/locations/us-central1/publishers/google/models";
+
+  it("sends Gemini requests to Vertex keys, on Google's host or a configured one", async () => {
+    const { config, backend, seen } = await setup();
+    backend.table = { credentials: upstreamCredentials(VERTEX), claudeOAuth: false, codexOAuth: false };
+    await handle(at(`/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${KEY}`, { method: "POST", body: "{}" }), config);
+    await handle(at(`/v1beta/models/zen%2Fgemini-2.5-pro:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(seen.map((request) => request.url)).toEqual([
+      "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+      "https://zenmux.example/api/v1/publishers/google/models/gemini-2.5-pro:generateContent",
+    ]);
+    expect(seen.map((request) => request.headers.get("x-goog-api-key"))).toEqual(["vk-1", "vk-2"]);
+    const listed = (await (await handle(at(`/v1beta/models?key=${KEY}`), config)).json()) as { models: { name: string }[] };
+    expect(listed.models.map((model) => model.name)).toEqual(expect.arrayContaining(["models/gemini-2.5-flash", "models/zen/gemini-2.5-pro"]));
+  });
+
+  it("serves Gemini and Claude clients through an imported service account", async () => {
+    const { config, backend, seen } = await setup();
+    backend.table = { credentials: [], claudeOAuth: false, codexOAuth: false, vertexOAuth: true };
+    await handle(at(`/v1beta/models/gemini-2.5-flash:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(seen[0]?.url).toBe(`${ENDPOINT}/gemini-2.5-flash:generateContent`);
+    expect(seen[0]?.headers.get("authorization")).toBe("Bearer ya29.vertex");
+    expect(seen[0]?.headers.get("x-goog-api-key")).toBeNull();
+    await handle(post("/v1/messages", { model: "gemini-2.5-pro", stream: true, max_tokens: 50, messages: [{ role: "user", content: "hi" }] }), config);
+    expect(seen[1]?.url).toBe(`${ENDPOINT}/gemini-2.5-pro:streamGenerateContent?alt=sse`);
+    expect(seen[1]?.headers.get("authorization")).toBe("Bearer ya29.vertex");
+    expect(await seen[1]?.json()).toMatchObject({ contents: [{ role: "user" }] });
+    expect(backend.calls.filter((call) => call === "loginToken:vertex")).toHaveLength(1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  it("asks for a new token when Google refuses one", async () => {
+    const { config, backend } = await setup(async () => new Response("no", { status: 401 }));
+    backend.table = { credentials: [], claudeOAuth: false, codexOAuth: false, vertexOAuth: true };
+    const response = await handle(at(`/v1beta/models/gemini-2.5-flash:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(response.status).toBe(401);
+    expect(backend.invalidated).toEqual(["ya29.vertex"]);
+    expect(config.cache.logins.has("vertex")).toBe(false);
+  });
+
+  it("explains a service account that can't mint a token, in the client's shape", async () => {
+    const { config, backend, seen } = await setup();
+    backend.table = { credentials: [], claudeOAuth: false, codexOAuth: false, vertexOAuth: true };
+    backend.vertexResult = { ok: false, status: 503, message: "Google refused the Vertex service account" };
+    const response = await handle(at(`/v1beta/models/gemini-2.5-flash:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { message: "Google refused the Vertex service account" } });
+    expect(seen).toHaveLength(0);
+  });
+});
+
+describe("Kimi logins", () => {
+  it("serves Claude Code and both OpenAI formats untranslated, with Kimi's model names", async () => {
+    const { config, backend, seen } = await setup();
+    backend.table = { credentials: [], claudeOAuth: true, codexOAuth: false, kimiOAuth: true };
+    await handle(post("/v1/messages", { model: "kimi-k2.8", max_tokens: 10, messages: [] }, { "anthropic-version": "2023-06-01", "anthropic-beta": "interleaved-thinking-2025-05-14", "user-agent": "claude-cli/2.1" }), config);
+    await handle(post("/v1/chat/completions", { model: "kimi-k3", messages: [] }), config);
+    await handle(post("/v1/responses", { model: "kimi-k3", input: "hi" }), config);
+    expect(seen.map((request) => request.url)).toEqual(["https://api.kimi.com/coding/v1/messages", "https://api.kimi.com/coding/v1/chat/completions", "https://api.kimi.com/coding/v1/responses"]);
+    expect(seen.map((request) => request.headers.get("authorization"))).toEqual(["Bearer kimi-at", "Bearer kimi-at", "Bearer kimi-at"]);
+    expect(seen[0]?.headers.get("user-agent")).toBe("sub2api");
+    expect(seen[0]?.headers.get("x-msh-device-id")).toBe("dev-1");
+    expect(seen[0]?.headers.get("anthropic-beta")).toBe("interleaved-thinking-2025-05-14");
+    expect(seen[0]?.headers.get("x-api-key")).toBeNull();
+    expect(await seen[0]?.json()).toMatchObject({ model: "kimi-for-coding" });
+    expect(await seen[1]?.json()).toMatchObject({ model: "k3" });
+    // Claude models still go to the Claude login.
+    await handle(post("/v1/messages", { model: "claude-sonnet-5-5", messages: [] }), config);
+    expect(seen[3]?.url).toBe("https://api.anthropic.com/v1/messages");
+    expect(backend.calls.filter((call) => call === "loginToken:kimi")).toHaveLength(1);
+  });
+
+  it("lists Kimi's models from CPA's catalog", async () => {
+    const { config, backend } = await setup();
+    backend.table = { credentials: [], claudeOAuth: false, codexOAuth: false, kimiOAuth: true };
+    const listed = (await (await handle(at("/v1/models", { headers: { authorization: `Bearer ${KEY}` } }), config)).json()) as { data: { id: string }[] };
+    expect(listed.data.map((model) => model.id)).toContain("kimi-k2");
+  });
+
+  it("asks for a new token when Kimi refuses one", async () => {
+    const { config, backend } = await setup(async () => new Response("no", { status: 401 }));
+    backend.table = { credentials: [], claudeOAuth: false, codexOAuth: false, kimiOAuth: true };
+    expect((await handle(post("/v1/chat/completions", { model: "kimi-k3", messages: [] }), config)).status).toBe(401);
+    expect(backend.invalidated).toEqual(["kimi-at"]);
   });
 });
 
@@ -807,6 +947,15 @@ describe("Claude Code on ChatGPT logins and Codex keys", () => {
     expect(seen).toHaveLength(1);
   });
 
+  it("serves an OpenAI Chat client from a ChatGPT login, through Claude Messages", async () => {
+    const { config, seen } = await loginSetup();
+    const response = await handle(post("/v1/chat/completions", { model: "gpt-5.6-sol", messages: [{ role: "user", content: "hi" }] }), config);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ object: "chat.completion", model: "gpt-5.6-sol", choices: [{ message: { content: "Hi" }, finish_reason: "stop" }] });
+    expect(seen[0]?.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+    expect(await seen[0]?.json()).toMatchObject({ model: "gpt-5.6-sol", stream: true, input: [{ type: "message", role: "user" }] });
+  });
+
   it("translates a 600 KB Claude Code request within the CPU budget", async () => {
     const history = Array.from({ length: 400 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: [{ type: "text", text: "x".repeat(1500) }] }));
     const tools = Array.from({ length: 30 }, (_, index) => ({ name: `tool_${index}`, description: "d".repeat(300), input_schema: { type: "object", properties: { a: { type: "string" } } } }));
@@ -945,5 +1094,63 @@ describe("routing across logins and keys", () => {
     await handle(messages({ "x-api-key": KEY }), config);
     await handle(messages({ "x-api-key": KEY }), config);
     expect(seen.map(tokenOf)).toEqual(["Bearer access-a.json", "Bearer access-b.json", "Bearer access-b.json", "Bearer access-a.json"]);
+  });
+});
+
+describe("OpenAI Responses clients on other providers", () => {
+  const claudeEvents = (events: unknown[]) =>
+    new Response(events.map((event) => `event: x\ndata: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+  const claudeAnswer = () =>
+    claudeEvents([
+      { type: "message_start", message: { id: "msg_1", usage: { input_tokens: 4, cache_read_input_tokens: 2 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hi" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "toolu_1", name: "fs_read", input: {} } },
+      { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"path":"a"}' } },
+      { type: "content_block_stop", index: 1 },
+      { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 3 } },
+      { type: "message_stop" },
+    ]);
+
+  it("serves a Responses client from a Claude API key, streamed and whole", async () => {
+    const { config, seen } = await providersSetup(async (request) =>
+      (await request.clone().json() as { stream?: boolean }).stream
+        ? claudeAnswer()
+        : Response.json({ id: "msg_2", content: [{ type: "text", text: "Hello" }], stop_reason: "max_tokens", usage: { input_tokens: 4, output_tokens: 9 } }),
+    );
+    const body = { model: "work/claude-sonnet-5-5", stream: true, instructions: "Be brief.", input: "hi", tools: [{ type: "function", name: "fs.read", parameters: { type: "object", properties: { path: { type: "string" } } } }] };
+    const streamed = await handle(post("/v1/responses", body), config);
+    expect(streamed.headers.get("content-type")).toMatch(/^text\/event-stream/);
+    const text = await streamed.text();
+    expect(text).toContain('"type":"response.output_text.delta"');
+    expect(text).toContain('"name":"fs.read","arguments":"{\\"path\\":\\"a\\"}"');
+    expect(text).toContain('event: response.completed');
+    expect(text).toContain('"input_tokens":6,"input_tokens_details":{"cached_tokens":2}');
+    const [sent] = seen;
+    expect(sent?.url).toBe("https://api.anthropic.com/v1/messages");
+    expect(sent?.headers.get("x-api-key")).toBe("sk-ant-1");
+    expect(sent?.headers.get("authorization")).toBeNull();
+    expect(await sent?.json()).toMatchObject({ model: "claude-sonnet-5-5", system: [{ type: "text", text: "Be brief." }], messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }], tools: [{ name: "fs_read" }] });
+    const whole = await handle(post("/v1/responses", { model: "work/claude-sonnet-5-5", input: "hi" }), config);
+    expect(await whole.json()).toMatchObject({ object: "response", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [{ type: "message", content: [{ type: "output_text", text: "Hello" }] }] });
+  });
+
+  it("serves a Responses client from an OpenAI-compatible key, through Claude Messages", async () => {
+    const chat = () => new Response(`data: ${JSON.stringify({ id: "chatcmpl-1", choices: [{ delta: { content: "Hi" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } });
+    const { config, seen } = await providersSetup(async () => chat());
+    const response = await handle(post("/v1/responses", { model: "kimi", stream: true, input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }] }), config);
+    const text = await response.text();
+    expect(text).toContain('"delta":"Hi"');
+    expect(text).toContain("event: response.completed");
+    expect(seen[0]?.url).toBe("https://router.example/api/v1/chat/completions");
+    expect(await seen[0]?.json()).toMatchObject({ model: "vendor/kimi-k2:free", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] });
+  });
+
+  it("returns upstream errors in the Responses shape", async () => {
+    const { config } = await providersSetup(async () => Response.json({ type: "error", error: { type: "overloaded_error", message: "Overloaded" } }, { status: 400 }));
+    const response = await handle(post("/v1/responses", { model: "work/claude-sonnet-5-5", input: "hi" }), config);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: { message: "Overloaded", type: "api_error", code: null } });
   });
 });

@@ -225,8 +225,8 @@ describe("model lists", () => {
     expect(definitions.models.map((model) => model.id)).toContain("gpt-6-astra");
     expect(definitions.models[0]?.object).toBe("model");
     expect((await (await call("GET", "routing/model-definitions/gemini")).json()) as { models: unknown[] }).toMatchObject({ channel: "gemini" });
-    const unknown = await call("GET", "routing/model-definitions/kimi");
+    const unknown = await call("GET", "routing/model-definitions/devin");
     expect(unknown.status).toBe(400);
-    expect(await unknown.json()).toEqual({ error: "unknown channel", channel: "kimi" });
+    expect(await unknown.json()).toEqual({ error: "unknown channel", channel: "devin" });
   });
 });
