@@ -1,5 +1,6 @@
 import { LOGIN_PROVIDERS, type Account, type LoginProvider } from "./account.ts";
 import { Config, ConfigError, configTag, ifMatchSatisfied } from "./config.ts";
+import { codexChannel, definition, definitionChannel, type Catalog } from "./models.ts";
 import { apiKeyKey, apiKeyProvider, loginKey, storedKey, type UsageStats } from "./usage.ts";
 import type { Cooldown } from "./routing.ts";
 import type { CredentialFile } from "./vault.ts";
@@ -10,7 +11,6 @@ import type { CredentialFile } from "./vault.ts";
 
 export const MANAGEMENT_PREFIX = "/v8/management";
 export const GATEWAY_VERSION = "sub2api-free";
-const ANTHROPIC_MODELS = "https://api.anthropic.com/v1/models";
 // CPA's provider names and their aliases.
 const OAUTH_ALIASES: Record<string, LoginProvider> = { claude: "claude", anthropic: "claude", codex: "codex", openai: "codex" };
 
@@ -291,19 +291,22 @@ async function resetCooldowns(request: Request, account: Account): Promise<Respo
   return json({ status: "ok", auth_index: name, models });
 }
 
-async function anthropicModels(account: Account): Promise<{ id: string; display_name: string }[]> {
-  const token = await account.token();
-  if (!token.ok) return [];
-  const response = await account
-    .fetcher(new Request(ANTHROPIC_MODELS, { headers: { authorization: `Bearer ${token.accessToken}`, "anthropic-version": "2023-06-01", "anthropic-beta": "oauth-2025-04-20" } }))
-    .catch(() => null);
-  if (response === null || !response.ok) return [];
-  const body = (await response.json().catch(() => null)) as { data?: { id?: unknown; display_name?: unknown }[] } | null;
-  return (body?.data ?? []).flatMap((model) => (typeof model.id === "string" ? [{ id: model.id, display_name: typeof model.display_name === "string" ? model.display_name : model.id }] : []));
+// CPA's catalog, refreshed first when a refresh is due.
+async function catalogOf(account: Account): Promise<Catalog> {
+  await account.catalog.refresh(account.fetcher, account.nowSeconds());
+  return account.catalog.current();
 }
 
-function modelInfo(model: { id: string; display_name: string }): Record<string, unknown> {
-  return { id: model.id, object: "model", owned_by: "anthropic", type: "claude", display_name: model.display_name };
+// The models a login serves, as CPA lists them for its auth file: none while it is disabled.
+async function loginModels(file: CredentialFile, account: Account): Promise<Record<string, unknown>[]> {
+  if (file.disabled) return [];
+  if (file.provider === "claude") return (await catalogOf(account)).claude.map(fileModel);
+  if (file.provider === "codex") return (await catalogOf(account))[codexChannel(typeof file.data.plan_type === "string" ? file.data.plan_type : "")].map(fileModel);
+  return [];
+}
+
+function fileModel(model: { id: string; display_name?: string; type?: string; owned_by?: string }): Record<string, unknown> {
+  return { id: model.id, ...(model.display_name === undefined ? {} : { display_name: model.display_name }), ...(model.type === undefined ? {} : { type: model.type }), ...(model.owned_by === undefined ? {} : { owned_by: model.owned_by }) };
 }
 
 async function oauthRoute(request: Request, url: URL, action: string, account: Account): Promise<Response> {
@@ -402,7 +405,7 @@ export async function handleManagement(request: Request, account: Account): Prom
       case "GET credentials/models": {
         const file = account.vault.credentialFile(url.searchParams.get("name")?.trim() ?? "");
         if (file === null) return failure(404, "auth file not found");
-        return json({ models: file.provider === "claude" ? (await anthropicModels(account)).map(modelInfo) : [] });
+        return json({ models: await loginModels(file, account) });
       }
       case "POST credentials/refresh": {
         const refreshed: string[] = [];
@@ -431,9 +434,10 @@ export async function handleManagement(request: Request, account: Account): Prom
         return resetCooldowns(request, account);
       default:
         if (request.method === "GET" && head === "routing" && rest[0] === "model-definitions" && rest.length === 2) {
-          const channel = (rest[1] as string).toLowerCase();
-          if (channel !== "claude") return failure(400, "unknown channel", { channel });
-          return json({ channel, models: (await anthropicModels(account)).map(modelInfo) });
+          const channel = (rest[1] as string).trim().toLowerCase();
+          const source = definitionChannel(channel);
+          if (source === null) return failure(400, "unknown channel", { channel: rest[1] });
+          return json({ channel, models: (await catalogOf(account))[source].map(definition) });
         }
         return failure(404, "not_found");
     }

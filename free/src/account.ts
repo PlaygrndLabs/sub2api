@@ -1,6 +1,7 @@
 import { OAuthError, authorizeUrl, exchangeCode, parseCallback, randomToken, refresh, type Fetcher } from "./claude-oauth.ts";
 import * as codex from "./codex-oauth.ts";
 import { Config } from "./config.ts";
+import { CatalogCache } from "./models.ts";
 import { flagOf, retryOf, upstreamCredentials, weightOf, type LoginEntry, type RoutingTable, type UpstreamCredential } from "./providers.ts";
 import { routingSettings, type CooldownEvent, type RoutingSettings } from "./routing.ts";
 import { storedKey, type UsageRecord } from "./usage.ts";
@@ -81,6 +82,8 @@ export class Account {
   private readonly refreshing = new Map<string, Promise<TokenResult>>();
   private readonly lastForcedRefresh = new Map<string, number>();
   private readonly next = new Map<LoginProvider, number>();
+  // CPA's model catalog, for the dashboard's model lists.
+  readonly catalog = new CatalogCache();
 
   constructor(
     readonly vault: Vault,
@@ -104,16 +107,19 @@ export class Account {
   }
 
   // What the Worker needs to pick an upstream for a request: the configured API-key providers,
-  // the enabled logins, the routing settings and the cooldowns every isolate has reported.
+  // the enabled logins (and the ChatGPT plans, which decide the models they list), the routing settings and the cooldowns every isolate has reported.
   async routing(): Promise<RoutingTable> {
     const tree = this.currentConfig().read([]);
     this.upstreams ??= upstreamCredentials(tree);
     this.settings ??= routingSettings(tree);
-    const logins = LOGIN_PROVIDERS.flatMap((provider) => this.loginFiles(provider)).map(loginEntry);
+    const files = LOGIN_PROVIDERS.flatMap((provider) => this.loginFiles(provider));
+    const logins = files.map(loginEntry);
+    const codexPlans = files.filter((file) => file.provider === "codex").map((file) => (typeof file.data.plan_type === "string" ? file.data.plan_type : ""));
     return {
       credentials: this.upstreams,
       claudeOAuth: logins.some((login) => login.provider === "claude"),
       codexOAuth: logins.some((login) => login.provider === "codex"),
+      codexPlans,
       logins,
       settings: this.settings,
       cooldowns: this.vault.cooldowns(this.nowSeconds()),
