@@ -1,18 +1,18 @@
 // Translation between Anthropic Messages (what Claude Code speaks) and OpenAI Responses (what
 // ChatGPT logins and Codex keys take), ported from CPA's translator/codex/claude.
 
-type Json = Record<string, unknown>;
+export type Json = Record<string, unknown>;
 
 const NAME_LIMIT = 64;
 // Codex reasoning items carry Fernet tokens; anything else (a Claude signature from an earlier
 // turn on another model) can't be replayed to OpenAI.
 const CODEX_SIGNATURE = /^gAAAA/;
 
-function isObject(value: unknown): value is Json {
+export function isObject(value: unknown): value is Json {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function text(value: unknown): string {
+export function text(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
@@ -63,7 +63,7 @@ function effortFromBudget(budget: number): string {
   return "xhigh";
 }
 
-function reasoningEffort(body: Json): string {
+export function reasoningEffort(body: Json): string {
   const config = isObject(body.output_config) ? body.output_config : {};
   let effort = text(config.effort).trim().toLowerCase();
   if (effort === "max") effort = "xhigh";
@@ -89,7 +89,7 @@ function cleanSchema(value: unknown): unknown {
   return Object.fromEntries(Object.entries(value).flatMap(([key, child]) => (key === "$schema" || key === "$id" ? [] : [[key, cleanSchema(child)]])));
 }
 
-function toolParameters(schema: unknown): Json {
+export function toolParameters(schema: unknown): Json {
   if (!isObject(schema)) return { type: "object", properties: {} };
   const cleaned = cleanSchema(schema) as Json;
   if (cleaned.type === undefined || cleaned.type === null || cleaned.type === "") cleaned.type = "object";
@@ -131,7 +131,7 @@ function toolResultOutput(content: unknown): unknown {
 }
 
 // Claude Code adds a billing attribution line to its system prompt that means nothing upstream.
-function isAttribution(line: string): boolean {
+export function isAttribution(line: string): boolean {
   return line.startsWith("x-anthropic-billing-header:");
 }
 
@@ -248,7 +248,7 @@ function stopReason(response: Json, toolUse: boolean): string {
   return "end_turn";
 }
 
-function usage(response: Json): Json {
+export function usage(response: Json): Json {
   const raw = isObject(response.usage) ? response.usage : {};
   const details = isObject(raw.input_tokens_details) ? raw.input_tokens_details : {};
   const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
@@ -258,12 +258,12 @@ function usage(response: Json): Json {
   return result;
 }
 
-function sse(event: string, data: Json): string {
+export function sse(event: string, data: Json): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
 // Turns a Responses event stream into Anthropic's, one upstream event at a time.
-export class ClaudeStream {
+export class ClaudeStream implements EventTranslator {
   private index = -1;
   private open: "text" | "thinking" | "tool" | null = null;
   private toolUse = false;
@@ -363,8 +363,14 @@ export class ClaudeStream {
   }
 }
 
-// Re-encodes an upstream Responses SSE body as Anthropic SSE, line by line as it arrives.
-export function claudeEventStream(upstream: ReadableStream<Uint8Array>, translator: ClaudeStream): ReadableStream<Uint8Array> {
+// Turns one upstream event (already parsed from its SSE data line) into Anthropic SSE text.
+export interface EventTranslator {
+  event(event: Json): string;
+  end(): string;
+}
+
+// Re-encodes an upstream SSE body as Anthropic SSE, line by line as it arrives.
+export function claudeEventStream(upstream: ReadableStream<Uint8Array>, translator: EventTranslator): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";

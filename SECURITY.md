@@ -19,7 +19,7 @@ Everything a deploy holds belongs to its owner: your Cloudflare account, your R2
 ### The Workers-only install (`free/`)
 
 - **API calls need a key from `access.api-keys`.** The key check and the Claude token are cached per Worker isolate for at most a minute, so a key or login you remove stops working everywhere within a minute.
-- **The dashboard and management API need two secrets,** as above: the `DASHBOARD_PASSWORD` sign-in cookie and the management key (`MANAGEMENT_KEY`, or the password when it isn't set). Use a separate `MANAGEMENT_KEY`: the dashboard can remember the key it is given in browser storage. Sign-in attempts are limited to 5 a minute per IP, and the dashboard page is never framed.
+- **The dashboard and management API need two secrets,** as above: the `DASHBOARD_PASSWORD` sign-in cookie and the management key (`MANAGEMENT_KEY`). Both installs require a separate `MANAGEMENT_KEY`, because the dashboard can remember the key it is given in browser storage; the Workers-only install keeps its management API off until the key is set and differs from the password. Sign-in attempts are limited to 5 a minute per IP, and the dashboard page is never framed.
 - **Only Anthropic is called.** The three proxied paths go to `api.anthropic.com` with an allowlist of request headers; the client's key and cookies are never forwarded. OAuth uses PKCE (S256), and refresh tokens stay in the Durable Object's storage.
 
 ## Your part

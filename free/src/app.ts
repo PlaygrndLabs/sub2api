@@ -1,5 +1,6 @@
 import { hashKey, REFRESH_MARGIN_SECONDS, type Backend } from "./account.ts";
 import type { Fetcher } from "./claude-oauth.ts";
+import { chatClaudeMessage, ChatClaudeStream, claudeToChat } from "./claude-openai.ts";
 import { claudeEventStream, claudeMessage, ClaudeStream, claudeToResponses } from "./claude-responses.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
 import { loginPage, messagePage } from "./pages.ts";
@@ -186,9 +187,10 @@ async function viaCodexLogin(request: Request, url: URL, config: AppConfig, text
   return collected(upstream);
 }
 
-// Formats a provider takes with translation; for now Claude clients can reach Responses upstreams.
+// Formats a provider takes with translation: Claude clients can reach Responses and Chat upstreams.
 function servable(format: Format, kind: Candidate["credential"]["kind"]): boolean {
-  return NATIVE_FORMAT[kind] === format || (format === "claude" && NATIVE_FORMAT[kind] === "openai-response");
+  const native = NATIVE_FORMAT[kind];
+  return native === format || (format === "claude" && (native === "openai-response" || native === "openai"));
 }
 
 function parsedObject(text: string): Record<string, unknown> | null {
@@ -209,14 +211,17 @@ async function upstreamMessage(upstream: Response): Promise<string> {
   return `The upstream answered ${upstream.status}.`;
 }
 
-// A Claude request served by a Responses upstream (a ChatGPT login or a Codex key): the body is
-// translated, and the answer translated back, streamed or whole.
-async function viaResponses(request: Request, url: URL, route: Route, config: AppConfig, candidate: Candidate, text: string): Promise<Response> {
+// A Claude request served by a Responses upstream (a ChatGPT login or a Codex key) or a Chat
+// Completions one (an OpenAI-compatible key): the body is translated, and the answer translated
+// back, streamed or whole.
+async function viaTranslation(request: Request, url: URL, route: Route, config: AppConfig, candidate: Candidate, text: string): Promise<Response> {
   const claude = parsedObject(text);
   if (claude === null) return formatError("claude", 400, "invalid_request_error", "The request body must be a JSON object.");
   if (url.pathname.endsWith("/count_tokens")) return Response.json({ input_tokens: Math.ceil(text.length / 4) }, { headers: { "cache-control": "no-store" } });
   const requested = typeof claude.model === "string" ? claude.model : candidate.model;
-  const translated = await claudeToResponses(claude, candidate.model);
+  const chat = NATIVE_FORMAT[candidate.credential.kind] === "openai";
+  const responses = chat ? null : await claudeToResponses(claude, candidate.model);
+  const translated = chat ? claudeToChat(claude, candidate.model) : (responses as NonNullable<typeof responses>);
   const body = JSON.stringify(translated.body);
   // The client's own headers describe a Claude request, so none of them go upstream.
   const bare = new Request(request.url, { method: "POST" });
@@ -228,7 +233,8 @@ async function viaResponses(request: Request, url: URL, route: Route, config: Ap
     accessToken = access.token;
     upstream = await config.upstream(codexRequest(bare, access.token, access.accountId, body)).catch(() => null);
   } else {
-    upstream = await config.upstream(providerRequest(bare, url, { ...route, format: "openai-response" }, candidate.credential, candidate.model, body)).catch(() => null);
+    const upstreamRoute: Route = { ...route, format: NATIVE_FORMAT[candidate.credential.kind] };
+    upstream = await config.upstream(providerRequest(bare, url, upstreamRoute, candidate.credential, candidate.model, body)).catch(() => null);
   }
   if (upstream === null) return formatError("claude", 502, "api_error", "The upstream couldn't be reached.");
   if (!upstream.ok) {
@@ -239,12 +245,17 @@ async function viaResponses(request: Request, url: URL, route: Route, config: Ap
     return formatError("claude", upstream.status, upstream.status === 429 ? "rate_limit_error" : "api_error", await upstreamMessage(upstream));
   }
   if (translated.stream && upstream.body !== null) {
-    const stream = claudeEventStream(upstream.body, new ClaudeStream(requested, translated.toolNames));
-    return new Response(stream, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" } });
+    const translator = responses === null ? new ChatClaudeStream(requested) : new ClaudeStream(requested, responses.toolNames);
+    return new Response(claudeEventStream(upstream.body, translator), { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" } });
+  }
+  if (responses === null) {
+    const final = parsedObject(await upstream.text());
+    if (final === null) return formatError("claude", 502, "api_error", "The upstream sent a response that isn't JSON.");
+    return Response.json(chatClaudeMessage(final, requested), { headers: { "cache-control": "no-store" } });
   }
   const final = await collected(upstream);
   if (!final.ok) return formatError("claude", final.status, "api_error", await upstreamMessage(final));
-  return Response.json(claudeMessage((await final.json()) as Record<string, unknown>, requested, translated.toolNames), { headers: { "cache-control": "no-store" } });
+  return Response.json(claudeMessage((await final.json()) as Record<string, unknown>, requested, responses.toolNames), { headers: { "cache-control": "no-store" } });
 }
 
 // Statuses after which another credential may well succeed.
@@ -325,7 +336,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
     const translated = route.format !== NATIVE_FORMAT[candidate.credential.kind];
     if (translated || candidate.credential.id === CLAUDE_LOGIN_ID || candidate.credential.id === CODEX_LOGIN_ID) {
       let response: Response;
-      if (translated) response = await viaResponses(request, url, route, config, candidate, text);
+      if (translated) response = await viaTranslation(request, url, route, config, candidate, text);
       else if (candidate.credential.id === CLAUDE_LOGIN_ID) response = await viaClaudeLogin(request, url, config, body);
       else response = await viaCodexLogin(request, url, config, body);
       if (isLast || !RETRY_STATUSES.has(response.status)) return response;
@@ -420,17 +431,25 @@ function withoutCookies(request: Request, target?: URL): Request {
   return new Request(target ?? request.url, new Request(request, { headers }));
 }
 
+// As on the container install, the management key is its own secret: the dashboard keeps it in
+// browser storage, so it must never be the sign-in password.
+const MANAGEMENT_KEY_NOT_SET = `The management API is off: set the MANAGEMENT_KEY secret to at least ${MIN_MANAGEMENT_KEY_LENGTH} characters, different from DASHBOARD_PASSWORD.`;
+
+function managementEnabled(config: AppConfig): boolean {
+  return config.managementKey.length >= MIN_MANAGEMENT_KEY_LENGTH && config.managementKey !== config.dashboardPassword;
+}
+
 // The dashboard sends CPA's management key with every call, on top of the sign-in cookie.
 async function managementKeyValid(request: Request, config: AppConfig): Promise<boolean> {
-  if (config.managementKey.length < MIN_MANAGEMENT_KEY_LENGTH) return false;
+  if (!managementEnabled(config)) return false;
   const bearer = request.headers.get("authorization")?.replace(/^bearer\s+/i, "").trim();
   const given = bearer || request.headers.get("x-management-key")?.trim() || "";
   return given !== "" && passwordMatches(given, config.managementKey);
 }
 
 async function management(request: Request, url: URL, config: AppConfig): Promise<Response> {
-  if (config.managementKey.length < MIN_MANAGEMENT_KEY_LENGTH) return notFound();
   if (!(await signedIn(request, config))) return Response.json({ error: "sign in at /login first" }, { status: 401 });
+  if (!managementEnabled(config)) return Response.json({ error: MANAGEMENT_KEY_NOT_SET }, { status: 503 });
   if (!(await managementKeyValid(request, config))) return Response.json({ error: "invalid management key" }, { status: 401 });
   // The dashboard checks a server with v0's config read before switching to v8.
   const target = url.pathname === "/v0/management/config" ? new URL(`${MANAGEMENT_PREFIX}/config${url.search}`, url) : url;

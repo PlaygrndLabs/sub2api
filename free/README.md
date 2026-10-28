@@ -11,13 +11,14 @@ It covers **Claude and ChatGPT (Codex) subscriptions** and **API keys** for Clau
 - `POST /v1/messages`, `POST /v1/messages/count_tokens` and `GET /v1/models`, streamed straight through to Anthropic.
 - API-key providers added under **AI Providers** (CPA's `api-keys` config): Claude, Gemini, Codex and OpenAI-compatible endpoints such as OpenRouter. Model aliases, `prefix/model` routing, priorities, key weights and excluded models work as in CPA, and a request moves on to the next key when one is rate limited or failing.
 - Codex CLI through a ChatGPT login, on `/backend-api/codex/responses` or `/v1/responses`. Other OpenAI Responses clients work too: their requests are adapted to what the ChatGPT endpoint takes, and a non-streaming request gets the final response as JSON.
+- Claude Code on an OpenAI-compatible key (OpenRouter and the like): ask for one of the provider's model aliases and the request goes out as Chat Completions, with the answer streamed back as Anthropic events, following CPA's Claude-to-OpenAI translator.
 - Claude Code on a ChatGPT login or a Codex API key: ask for a ChatGPT model (for example `ANTHROPIC_MODEL=gpt-5.6-sol`) and the request is translated to OpenAI Responses and the answer streamed back as Anthropic events, with thinking, tool calls and images, following CPA's Claude-to-Codex translator.
-- Each client talks in its own format: Anthropic (`/v1/messages`), OpenAI Chat (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`) and Gemini (`/v1beta/models/{model}:generateContent`). A request goes to a provider that takes the same format, apart from the Claude-to-Responses translation above.
+- Each client talks in its own format: Anthropic (`/v1/messages`), OpenAI Chat (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`) and Gemini (`/v1beta/models/{model}:generateContent`). A request goes to a provider that takes the same format, apart from the Claude translations above.
 - Everything is stored in one SQLite-backed Durable Object, which the free plan includes.
 
-Claude Code and Codex CLI request bodies are never parsed, so a Worker spends well under 1 ms of its 10 ms CPU budget even on a 600 KB Claude Code request (see the CPU test in `test/app.test.ts`). Requests that need a model rewritten or a body adapted are parsed once. Translated requests cost the most, about 6 ms for a 600 KB conversation; very long conversations translated to ChatGPT can run past the free plan's 10 ms, which the Container install doesn't have.
+Claude Code and Codex CLI request bodies are never parsed, so a Worker spends well under 1 ms of its 10 ms CPU budget even on a 600 KB Claude Code request (see the CPU test in `test/app.test.ts`). Requests that need a model rewritten or a body adapted are parsed once. Translated requests cost the most, about 4 to 6 ms for a 600 KB conversation; very long conversations translated to ChatGPT can run past the free plan's 10 ms, which the Container install doesn't have.
 
-Not included yet: other translations (Claude Code to OpenAI-compatible and Gemini providers, OpenAI clients to Claude), Gemini and other OAuth logins, model lists for ChatGPT logins, usage statistics and request logs. Deliberately left out: CPA's request cloaking and TLS fingerprint spoofing. Clients other than Claude Code may be refused by Anthropic when they use a subscription token.
+Not included yet: other translations (Claude Code to Gemini, OpenAI clients to Claude), Gemini and other OAuth logins, model lists for ChatGPT logins, usage statistics and request logs. Deliberately left out: CPA's request cloaking and TLS fingerprint spoofing. Clients other than Claude Code may be refused by Anthropic when they use a subscription token.
 
 ## Try it
 
@@ -25,18 +26,18 @@ You need a Cloudflare account. The free plan is enough.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free)
 
-It asks for `DASHBOARD_PASSWORD` (at least 16 characters) and optionally `MANAGEMENT_KEY`. Or from a clone:
+It asks for `DASHBOARD_PASSWORD` and `MANAGEMENT_KEY`, each at least 16 characters and different from each other, as on the Container install. Or from a clone:
 
 ```bash
 cd free && npm ci
 npx wrangler login
 npx wrangler deploy
 npx wrangler secret put DASHBOARD_PASSWORD   # at least 16 characters
-npx wrangler secret put MANAGEMENT_KEY       # optional; defaults to the dashboard password
+npx wrangler secret put MANAGEMENT_KEY       # at least 16 characters, not the dashboard password
 ```
 
 1. Open `https://sub2api-free.<your-subdomain>.workers.dev` and sign in with the dashboard password.
-2. CPA's dashboard opens and asks for the management key: enter `MANAGEMENT_KEY`, or the dashboard password if you didn't set one.
+2. CPA's dashboard opens and asks for the management key: enter `MANAGEMENT_KEY`.
 3. Under **OAuth Login**, press **+** on Claude, approve on Claude's page, then paste the `localhost` address you land on into **Callback URL**.
 4. Under **Config Panel**, add an API key and save, then point Claude Code at the gateway:
 
@@ -60,7 +61,7 @@ env_key = "SUB2API_KEY"
 
 Keys and the login made with the first free release keep working: the old login is turned into an auth file on first use.
 
-The management API sits behind both the sign-in cookie and the management key. It is off when neither secret is at least 16 characters.
+The management API sits behind both the sign-in cookie and the management key. It stays off until `MANAGEMENT_KEY` is set to at least 16 characters and differs from the dashboard password, because the dashboard keeps the key in browser storage.
 
 ## Deploying from GitHub
 
