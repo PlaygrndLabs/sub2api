@@ -6,8 +6,9 @@ import { claudeEventStream, claudeMessage, ClaudeStream, claudeToResponses } fro
 import { chatCompletion, ChatStream, chatToClaude } from "./openai-claude.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
 import { loginPage, messagePage } from "./pages.ts";
-import { candidates, inDefaultFamily, listedModels, NATIVE_FORMAT, ordered, type Candidate, type Format, type RoutingTable } from "./providers.ts";
+import { candidates, inDefaultFamily, listedModels, NATIVE_FORMAT, splitModel, type Candidate, type Format, type LoginEntry, type RoutingTable } from "./providers.ts";
 import { CODEX_UPSTREAM, codexRequest, downstreamResponse, formatError, presentedKey, providerRequest, routeOf, upstreamRequest, UPSTREAM, type Route } from "./proxy.ts";
+import { CooldownBook, retryHint, route as routed, type CooldownEvent } from "./routing.ts";
 import { apiKeyKey, loginKey, requestLine, type Attempt, type UsageRecord } from "./usage.ts";
 import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "./session.ts";
 
@@ -26,22 +27,33 @@ const USAGE_FLUSH_MS = 5000;
 const USAGE_FLUSH_COUNT = 50;
 const OAUTH_CALLBACK_PATHS = new Set(["/callback", "/auth/callback", "/oauth-callback", "/anthropic/callback", "/codex/callback"]);
 
+export interface CachedToken {
+  readonly value: string;
+  // The login file the token belongs to.
+  readonly name: string;
+  readonly accountId: string;
+  readonly expiresAt: number;
+  readonly cachedUntil: number;
+}
+
 // Per-isolate memory, so most API calls skip the Durable Object round trip entirely.
 export class EdgeCache {
   readonly keys = new Map<string, number>();
-  token: { value: string; name: string; expiresAt: number; cachedUntil: number } | null = null;
-  codexToken: { value: string; name: string; accountId: string; expiresAt: number; cachedUntil: number } | null = null;
+  // Login tokens by "<provider>:<login name>"; the name is empty for "the next login in turn".
+  readonly tokens = new Map<string, CachedToken>();
   routing: { table: RoutingTable; until: number } | null = null;
+  readonly cooldowns = new CooldownBook();
   turn = 0;
   usage: UsageRecord[] = [];
+  cooling: CooldownEvent[] = [];
   flushing = false;
 
   // A config or login change reaches this isolate at once and others within a minute.
   forgetConfig(): void {
     this.keys.clear();
     this.routing = null;
-    this.token = null;
-    this.codexToken = null;
+    this.tokens.clear();
+    this.cooldowns.clear();
   }
 }
 
@@ -56,6 +68,8 @@ export interface AppConfig {
   // Keeps the isolate alive for work after the response, such as sending usage records.
   readonly waitUntil?: (promise: Promise<unknown>) => void;
   readonly usageFlushMs?: number;
+  // Waits between retry rounds; tests pass their own.
+  readonly sleep?: (ms: number) => Promise<void>;
 }
 
 function apiError(status: number, type: string, message: string): Response {
@@ -102,38 +116,45 @@ async function routingTable(config: AppConfig): Promise<RoutingTable> {
   return table;
 }
 
-async function accessToken(config: AppConfig): Promise<{ token: string } | Response> {
-  const cached = config.cache.token;
+function tokenKey(provider: LoginEntry["provider"], name: string): string {
+  return `${provider}:${name}`;
+}
+
+// A login's token from this isolate's cache, or from the Durable Object, which keeps it fresh.
+// An empty name asks for the next login in turn.
+async function loginToken(config: AppConfig, provider: LoginEntry["provider"], name: string): Promise<CachedToken | { status: number; message: string }> {
+  const key = tokenKey(provider, name);
+  const cached = config.cache.tokens.get(key);
   const now = config.nowSeconds();
-  if (cached !== null && cached.cachedUntil > now && cached.expiresAt - now > REFRESH_MARGIN_SECONDS) return { token: cached.value };
-  const result = await config.backend.token();
-  if (!result.ok) return apiError(result.status, "api_error", result.message);
-  config.cache.token = { value: result.accessToken, name: result.name ?? "", expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS };
-  return { token: result.accessToken };
+  if (cached !== undefined && cached.cachedUntil > now && cached.expiresAt - now > REFRESH_MARGIN_SECONDS) return cached;
+  const login = name === "" ? undefined : name;
+  const result = await (provider === "claude" ? config.backend.token(login) : config.backend.codexToken(login));
+  if (!result.ok) return { status: result.status, message: result.message };
+  const token = { value: result.accessToken, name: result.name ?? name, accountId: result.accountId ?? "", expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS };
+  config.cache.tokens.set(key, token);
+  return token;
+}
+
+// The provider refused the token: drop it here and have the Durable Object refresh it.
+async function refused(config: AppConfig, provider: LoginEntry["provider"], name: string, token: string): Promise<void> {
+  config.cache.tokens.delete(tokenKey(provider, name));
+  await config.backend.invalidate(token);
 }
 
 // A Claude subscription login, through the OAuth token the Durable Object keeps fresh.
-async function viaClaudeLogin(request: Request, url: URL, config: AppConfig, body?: string): Promise<Response> {
-  const token = await accessToken(config);
-  if (token instanceof Response) return token;
-  const upstream = await config.upstream(upstreamRequest(request, url, token.token, body)).catch(() => null);
+async function viaClaudeLogin(request: Request, url: URL, config: AppConfig, body?: string, name = ""): Promise<Response> {
+  const token = await loginToken(config, "claude", name);
+  if (!("value" in token)) return apiError(token.status, "api_error", token.message);
+  const upstream = await config.upstream(upstreamRequest(request, url, token.value, body)).catch(() => null);
   if (upstream === null) return apiError(502, "api_error", "Anthropic couldn't be reached.");
-  if (upstream.status === 401) {
-    config.cache.token = null;
-    await config.backend.invalidate(token.token);
-  }
+  if (upstream.status === 401) await refused(config, "claude", name, token.value);
   return downstreamResponse(upstream);
 }
 
-async function codexAccess(config: AppConfig): Promise<{ token: string; accountId: string } | Response> {
-  const cached = config.cache.codexToken;
-  const now = config.nowSeconds();
-  if (cached !== null && cached.cachedUntil > now && cached.expiresAt - now > REFRESH_MARGIN_SECONDS) return { token: cached.value, accountId: cached.accountId };
-  const result = await config.backend.codexToken();
-  if (!result.ok) return formatError("openai-response", result.status, "api_error", result.message);
-  const accountId = result.accountId ?? "";
-  config.cache.codexToken = { value: result.accessToken, name: result.name ?? "", accountId, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS };
-  return { token: result.accessToken, accountId };
+async function codexAccess(config: AppConfig, name = ""): Promise<{ token: string; accountId: string } | Response> {
+  const token = await loginToken(config, "codex", name);
+  if (!("value" in token)) return formatError("openai-response", token.status, "api_error", token.message);
+  return { token: token.value, accountId: token.accountId };
 }
 
 // Fields the ChatGPT Codex endpoint refuses, which other Responses clients may send (as CPA strips).
@@ -182,18 +203,15 @@ async function collected(upstream: Response): Promise<Response> {
 }
 
 // A ChatGPT (Codex) subscription login, through the OAuth token the Durable Object keeps fresh.
-async function viaCodexLogin(request: Request, url: URL, config: AppConfig, text: string): Promise<Response> {
+async function viaCodexLogin(request: Request, url: URL, config: AppConfig, text: string, name = ""): Promise<Response> {
   const native = url.pathname === "/backend-api/codex/responses" || request.headers.has("originator");
   const prepared = codexBody(text, native);
   if (prepared === null) return formatError("openai-response", 400, "invalid_request_error", "The request body must be a JSON object.");
-  const access = await codexAccess(config);
+  const access = await codexAccess(config, name);
   if (access instanceof Response) return access;
   const upstream = await config.upstream(codexRequest(request, access.token, access.accountId, prepared.body)).catch(() => null);
   if (upstream === null) return formatError("openai-response", 502, "api_error", "ChatGPT couldn't be reached.");
-  if (upstream.status === 401) {
-    config.cache.codexToken = null;
-    await config.backend.invalidate(access.token);
-  }
+  if (upstream.status === 401) await refused(config, "codex", name, access.token);
   if (!upstream.ok || prepared.stream) return downstreamResponse(upstream);
   return collected(upstream);
 }
@@ -240,8 +258,9 @@ async function viaTranslation(request: Request, url: URL, route: Route, config: 
   const bare = new Request(request.url, { method: "POST" });
   let upstream: Response | null;
   let accessToken = "";
-  if (candidate.credential.id === CODEX_LOGIN_ID) {
-    const access = await codexAccess(config);
+  const login = loginName(candidate);
+  if (login !== null) {
+    const access = await codexAccess(config, login);
     if (access instanceof Response) return formatError("claude", access.status, "api_error", await upstreamMessage(access));
     accessToken = access.token;
     upstream = await config.upstream(codexRequest(bare, access.token, access.accountId, body)).catch(() => null);
@@ -256,10 +275,7 @@ async function viaTranslation(request: Request, url: URL, route: Route, config: 
   }
   if (upstream === null) return formatError("claude", 502, "api_error", "The upstream couldn't be reached.");
   if (!upstream.ok) {
-    if (upstream.status === 401 && accessToken !== "") {
-      config.cache.codexToken = null;
-      await config.backend.invalidate(accessToken);
-    }
+    if (upstream.status === 401 && accessToken !== "") await refused(config, "codex", login ?? "", accessToken);
     return formatError("claude", upstream.status, upstream.status === 429 ? "rate_limit_error" : "api_error", await upstreamMessage(upstream));
   }
   if (translated.stream && upstream.body !== null) {
@@ -298,16 +314,45 @@ async function viaClaudeKey(request: Request, config: AppConfig, candidate: Cand
   return Response.json(chatCompletion(final, requested, translated.toolNames), { headers: { "cache-control": "no-store" } });
 }
 
-// Statuses after which another credential may well succeed.
-const RETRY_STATUSES = new Set([401, 403, 408, 429, 500, 502, 503, 504, 529]);
-const MAX_ATTEMPTS = 3;
-const CLAUDE_LOGIN_ID = "claude-login";
-const CODEX_LOGIN_ID = "codex-login";
+// A login is a candidate of its own, with id "file:<login name>" as in the usage counts.
+const LOGIN_GROUP = "oauth";
 
-function loginCandidate(kind: "claude" | "codex", model: string): Candidate {
-  const id = kind === "claude" ? CLAUDE_LOGIN_ID : CODEX_LOGIN_ID;
-  const baseUrl = kind === "claude" ? UPSTREAM : CODEX_UPSTREAM;
-  return { model, credential: { id, kind, group: "oauth", baseUrl, apiKey: "", weight: 1, priority: 0, prefix: "", headers: {}, models: [], excluded: [] } };
+function loginCandidate(login: LoginEntry, model: string): Candidate {
+  const baseUrl = login.provider === "claude" ? UPSTREAM : CODEX_UPSTREAM;
+  return {
+    model,
+    credential: {
+      id: loginKey(login.name),
+      kind: login.provider,
+      group: LOGIN_GROUP,
+      baseUrl,
+      apiKey: "",
+      weight: login.weight,
+      priority: login.priority,
+      prefix: login.prefix,
+      headers: {},
+      models: [],
+      excluded: [],
+      disableCooling: login.disableCooling,
+      requestRetry: login.requestRetry,
+    },
+  };
+}
+
+// The login file a candidate uses ("" for the next login in turn), or null for an API key.
+function loginName(candidate: Candidate): string | null {
+  return candidate.credential.group === LOGIN_GROUP ? candidate.credential.id.slice("file:".length) : null;
+}
+
+// Each enabled login. A table without the list (an older Durable Object) stands for one login per
+// provider, which the Durable Object then picks in turn.
+function anyLogin(provider: LoginEntry["provider"]): LoginEntry {
+  return { name: "", provider, priority: 0, weight: 1, prefix: "", disableCooling: null, requestRetry: null };
+}
+
+function loginsOf(table: RoutingTable): readonly LoginEntry[] {
+  if (table.logins !== undefined) return table.logins;
+  return [...(table.claudeOAuth ? [anyLogin("claude")] : []), ...(table.codexOAuth ? [anyLogin("codex")] : [])];
 }
 
 // Most clients put "model" first. Then it is read and replaced in place, without parsing the
@@ -349,18 +394,32 @@ interface Trace {
 
 function noteAttempt(trace: Trace, config: AppConfig, candidate: Candidate, status: number): void {
   trace.provider = candidate.credential.kind;
-  let key: string | null = apiKeyKey(candidate.credential);
-  if (candidate.credential.id === CLAUDE_LOGIN_ID) key = config.cache.token?.name ? loginKey(config.cache.token.name) : null;
-  else if (candidate.credential.id === CODEX_LOGIN_ID) key = config.cache.codexToken?.name ? loginKey(config.cache.codexToken.name) : null;
+  const login = loginName(candidate);
+  let key: string | null = login === null ? apiKeyKey(candidate.credential) : loginKey(login);
+  if (login === "") {
+    const name = config.cache.tokens.get(tokenKey(candidate.credential.kind === "codex" ? "codex" : "claude", ""))?.name;
+    key = name ? loginKey(name) : null;
+  }
   if (key !== null) trace.attempts.push({ key, ok: status < 400 });
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Error bodies are read for a wait hint only while small.
+const HINT_BODY_LIMIT = 64 * 1024;
+
 async function proxied(request: Request, url: URL, route: Route & { format: Format }, config: AppConfig, trace: Trace): Promise<Response> {
   const table = await routingTable(config);
-  // Claude clients with only Claude logins configured: stream the body through unread.
-  if (route.format === "claude" && !table.codexOAuth && !table.credentials.some((credential) => servable("claude", credential.kind))) {
-    const response = await viaClaudeLogin(request, url, config);
-    noteAttempt(trace, config, loginCandidate("claude", ""), response.status);
+  const logins = loginsOf(table);
+  const claudeLogins = logins.filter((login) => login.provider === "claude");
+  const codexLogins = logins.filter((login) => login.provider === "codex");
+  // Claude clients with one Claude login and nothing else: stream the body through unread.
+  if (route.format === "claude" && claudeLogins.length === 1 && codexLogins.length === 0 && !table.credentials.some((credential) => servable("claude", credential.kind))) {
+    const only = loginCandidate(claudeLogins[0] as LoginEntry, "");
+    const response = await viaClaudeLogin(request, url, config, undefined, loginName(only) ?? "");
+    noteAttempt(trace, config, only, response.status);
     return response;
   }
   const length = Number(request.headers.get("content-length") ?? "0");
@@ -372,15 +431,18 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   trace.model = model;
   const found = candidates(table, model);
   const usable = found.filter((candidate) => servable(route.format, candidate.credential.kind));
-  if (route.format === "claude" && table.claudeOAuth && /^claude-/i.test(model)) usable.push(loginCandidate("claude", model));
+  // "prefix/model" picks the logins with that prefix; other names may use any login.
+  const { prefix, model: bare } = splitModel(table, model);
+  const loginsFor = (provider: LoginEntry["provider"]) => (provider === "claude" ? claudeLogins : codexLogins).filter((login) => prefix === "" || login.prefix === prefix).map((login) => loginCandidate(login, bare));
+  if (route.format === "claude" && /^claude-/i.test(bare)) usable.push(...loginsFor("claude"));
   // ChatGPT logins take Codex's own models, and any Responses model nothing else serves.
-  if (route.format === "openai-response" && table.codexOAuth && (inDefaultFamily("codex", model) || usable.length === 0)) usable.push(loginCandidate("codex", model));
+  if (route.format === "openai-response" && (inDefaultFamily("codex", bare) || usable.length === 0)) usable.push(...loginsFor("codex"));
   // Claude Code asking for a ChatGPT model by name, e.g. ANTHROPIC_MODEL=gpt-5.6-sol.
-  if (route.format === "claude" && table.codexOAuth && inDefaultFamily("codex", model)) usable.push(loginCandidate("codex", model));
+  if (route.format === "claude" && inDefaultFamily("codex", bare)) usable.push(...loginsFor("codex"));
   if (usable.length === 0) {
     if (route.format === "claude" && table.claudeOAuth) {
       const response = await viaClaudeLogin(request, url, config, text);
-      noteAttempt(trace, config, loginCandidate("claude", model), response.status);
+      noteAttempt(trace, config, loginCandidate(anyLogin("claude"), model), response.status);
       return response;
     }
     // Without CPA's cloaking a Claude login serves Claude Code only, so it isn't offered here.
@@ -392,34 +454,55 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
         : `No provider is configured for model ${model}. Add one under AI Providers in the dashboard.`;
     return formatError(route.format, 400, "invalid_request_error", reason);
   }
-  config.cache.turn += 1;
-  const attempts = ordered(usable, config.cache.turn).slice(0, MAX_ATTEMPTS);
-  let last: Response | null = null;
-  for (const [index, candidate] of attempts.entries()) {
-    const isLast = index === attempts.length - 1;
+  // One attempt with one candidate, through the path its provider and the request format need.
+  const serveWith = async (candidate: Candidate, attemptConfig: AppConfig): Promise<Response> => {
     const body = parsed === null || candidate.model === model ? text : parsed.withModel(candidate.model);
     const translated = route.format !== NATIVE_FORMAT[candidate.credential.kind];
-    if (translated || candidate.credential.id === CLAUDE_LOGIN_ID || candidate.credential.id === CODEX_LOGIN_ID) {
-      let response: Response;
-      if (translated && route.format === "openai") response = await viaClaudeKey(request, config, candidate, text);
-      else if (translated) response = await viaTranslation(request, url, route, config, candidate, text);
-      else if (candidate.credential.id === CLAUDE_LOGIN_ID) response = await viaClaudeLogin(request, url, config, body);
-      else response = await viaCodexLogin(request, url, config, body);
+    const login = loginName(candidate);
+    if (translated && route.format === "openai") return viaClaudeKey(request, attemptConfig, candidate, text);
+    if (translated) return viaTranslation(request, url, route, attemptConfig, candidate, text);
+    if (login !== null && candidate.credential.kind === "claude") return viaClaudeLogin(request, url, attemptConfig, body, login);
+    if (login !== null) return viaCodexLogin(request, url, attemptConfig, body, login);
+    const upstream = await attemptConfig.upstream(providerRequest(request, url, route, candidate.credential, candidate.model, body)).catch(() => null);
+    return upstream === null ? formatError(route.format, 502, "api_error", "The upstream couldn't be reached.") : downstreamResponse(upstream);
+  };
+  // The first request in an isolate starts at the first credential, as CPA's rotation does.
+  const turn = config.cache.turn;
+  config.cache.turn += 1;
+  return routed({
+    table,
+    usable,
+    turn,
+    book: config.cache.cooldowns,
+    nowSeconds: config.nowSeconds,
+    sleep: config.sleep ?? sleep,
+    isLogin: (candidate) => loginName(candidate) !== null,
+    attempt: async (candidate) => {
+      // The upstream's own answer carries the wait hint, whatever shape the client gets back.
+      let hint: Promise<number | null> = Promise.resolve(null);
+      const watched: AppConfig = {
+        ...config,
+        upstream: async (upstreamRequest) => {
+          const upstream = await config.upstream(upstreamRequest);
+          if (upstream.status === 429 || upstream.status === 404 || upstream.status >= 500) {
+            const small = Number(upstream.headers.get("content-length") ?? "0") <= HINT_BODY_LIMIT;
+            const body = upstream.status === 429 && small ? upstream.clone().text().catch(() => "") : Promise.resolve("");
+            hint = body.then((text) => retryHint(upstream.headers, text.slice(0, HINT_BODY_LIMIT), config.nowSeconds()));
+          }
+          return upstream;
+        },
+      };
+      const response = await serveWith(candidate, watched);
       noteAttempt(trace, config, candidate, response.status);
-      if (isLast || !RETRY_STATUSES.has(response.status)) return response;
-      await response.body?.cancel();
-      last = new Response(null, { status: response.status });
-      continue;
-    }
-    const upstream = await config.upstream(providerRequest(request, url, route, candidate.credential, candidate.model, body)).catch(() => null);
-    noteAttempt(trace, config, candidate, upstream?.status ?? 502);
-    if (upstream !== null && (isLast || !RETRY_STATUSES.has(upstream.status))) return downstreamResponse(upstream);
-    if (upstream !== null) {
-      await upstream.body?.cancel();
-      last = new Response(null, { status: upstream.status });
-    }
-  }
-  return formatError(route.format, last?.status ?? 502, "api_error", "No provider could serve the request right now.");
+      return { response, hint: response.ok ? null : await hint };
+    },
+    report: (event) => share(config, event),
+    cooling: (seconds) => {
+      const response = formatError(route.format, 429, "rate_limit_error", `Every credential for model ${model} is cooling down after errors or rate limits. Try again in ${Math.max(1, seconds)} s, or reset the cooldowns in the dashboard.`);
+      response.headers.set("retry-after", String(Math.max(1, seconds)));
+      return response;
+    },
+  });
 }
 
 async function modelList(request: Request, url: URL, config: AppConfig): Promise<Response> {
@@ -444,17 +527,18 @@ async function modelList(request: Request, url: URL, config: AppConfig): Promise
   return Response.json({ ...body, data: [...(body.data ?? []), ...extra] }, { headers });
 }
 
-// Sends the isolate's usage records to the Durable Object, a few seconds after the first one so
-// that requests close together share one call.
-function remember(config: AppConfig, record: UsageRecord): void {
+// Sends the isolate's usage records and cooldowns to the Durable Object, a few seconds after the
+// first one so that requests close together share one call.
+function flushSoon(config: AppConfig): void {
   const cache = config.cache;
   if (config.waitUntil === undefined) return;
-  cache.usage.push(record);
   const flush = async () => {
     const batch = cache.usage.splice(0);
+    const cooling = cache.cooling.splice(0);
     if (batch.length > 0) await config.backend.record(batch).catch(() => undefined);
+    if (cooling.length > 0) await config.backend.cool(cooling).catch(() => undefined);
   };
-  if (cache.usage.length >= USAGE_FLUSH_COUNT) {
+  if (cache.usage.length + cache.cooling.length >= USAGE_FLUSH_COUNT) {
     config.waitUntil(flush());
     return;
   }
@@ -467,6 +551,18 @@ function remember(config: AppConfig, record: UsageRecord): void {
         cache.flushing = false;
       }),
   );
+}
+
+function remember(config: AppConfig, record: UsageRecord): void {
+  if (config.waitUntil === undefined) return;
+  config.cache.usage.push(record);
+  flushSoon(config);
+}
+
+function share(config: AppConfig, event: CooldownEvent): void {
+  if (config.waitUntil === undefined) return;
+  config.cache.cooling.push(event);
+  flushSoon(config);
 }
 
 function requestId(): string {

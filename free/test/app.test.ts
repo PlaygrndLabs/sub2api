@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { hashKey, type Backend, type TokenResult } from "../src/account.ts";
 import { EdgeCache, handle, type AppConfig } from "../src/app.ts";
-import { upstreamCredentials, type RoutingTable } from "../src/providers.ts";
+import { upstreamCredentials, type LoginEntry, type RoutingTable } from "../src/providers.ts";
 import { OAUTH_BETA } from "../src/proxy.ts";
 import { SESSION_COOKIE, issueSession } from "../src/session.ts";
+import { routingSettings, type Cooldown, type CooldownEvent } from "../src/routing.ts";
 import type { UsageRecord } from "../src/usage.ts";
 
 const PASSWORD = "correct-horse-battery-staple-0123456789";
@@ -24,14 +25,18 @@ class FakeBackend implements Backend {
     this.calls.push("keyValid");
     return this.hashes.has(hash);
   }
-  async token() {
-    this.calls.push("token");
-    return this.tokenResult;
+  // Named logins get a token of their own, unless a test sets one.
+  named: Record<string, TokenResult> = {};
+  async token(name?: string) {
+    this.calls.push(name === undefined ? "token" : `token:${name}`);
+    if (name === undefined) return this.tokenResult;
+    return this.named[name] ?? { ok: true, accessToken: `access-${name}`, expiresAt: NOW + 3600, name };
   }
   codexResult: TokenResult = { ok: true, accessToken: "chatgpt-1", expiresAt: NOW + 3600, accountId: "acct-1" };
-  async codexToken() {
-    this.calls.push("codexToken");
-    return this.codexResult;
+  async codexToken(name?: string) {
+    this.calls.push(name === undefined ? "codexToken" : `codexToken:${name}`);
+    if (name === undefined) return this.codexResult;
+    return this.named[name] ?? { ok: true, accessToken: `chatgpt-${name}`, expiresAt: NOW + 3600, accountId: `acct-${name}`, name };
   }
   async invalidate(accessToken: string) {
     this.invalidated.push(accessToken);
@@ -51,6 +56,10 @@ class FakeBackend implements Backend {
   recorded: UsageRecord[] = [];
   async record(records: UsageRecord[]) {
     this.recorded.push(...records);
+  }
+  cooled: CooldownEvent[] = [];
+  async cool(events: CooldownEvent[]) {
+    this.cooled.push(...events);
   }
 }
 
@@ -174,7 +183,7 @@ describe("API proxy", () => {
     const later = { ...config, nowSeconds: () => NOW + 61 };
     await handle(messages({ "x-api-key": KEY }), later);
     expect(backend.calls.filter((call) => call === "token")).toHaveLength(2);
-    expect(config.cache.token?.value).toBe("access-2");
+    expect(config.cache.tokens.get("claude:")?.value).toBe("access-2");
   });
 
   it("drops the token and tells the store when Anthropic refuses it", async () => {
@@ -182,7 +191,7 @@ describe("API proxy", () => {
     const response = await handle(messages({ "x-api-key": KEY }), config);
     expect(response.status).toBe(401);
     expect(backend.invalidated).toEqual(["access-1"]);
-    expect(config.cache.token).toBeNull();
+    expect(config.cache.tokens.size).toBe(0);
   });
 
   it("explains a missing Claude login in Anthropic's error shape", async () => {
@@ -262,10 +271,18 @@ describe("API-key providers", () => {
     expect(await seen[1]?.text()).toBe(' { "model" : "vendor/kimi-k2:free", "x": "\\"" }');
   });
 
-  it("shares requests between keys by weight", async () => {
-    const { config, seen } = await providersSetup();
-    for (let turn = 0; turn < 4; turn += 1) await handle(post("/v1/chat/completions", { model: "deepseek-v3" }), config);
-    expect(seen.map((request) => request.headers.get("authorization"))).toEqual(["Bearer sk-router-1", "Bearer sk-router-1", "Bearer sk-router-2", "Bearer sk-router-1"]);
+  it("takes keys in turn, and by weight under weighted-round-robin, as CPA's strategies do", async () => {
+    const plain = await providersSetup();
+    for (let turn = 0; turn < 4; turn += 1) await handle(post("/v1/chat/completions", { model: "deepseek-v3" }), plain.config);
+    expect(plain.seen.map((request) => request.headers.get("authorization"))).toEqual(["Bearer sk-router-1", "Bearer sk-router-2", "Bearer sk-router-1", "Bearer sk-router-2"]);
+    const weighted = await providersSetup();
+    weighted.backend.table = { ...weighted.backend.table, settings: routingSettings({ routing: { strategy: "weighted-round-robin" } }) };
+    for (let turn = 0; turn < 4; turn += 1) await handle(post("/v1/chat/completions", { model: "deepseek-v3" }), weighted.config);
+    expect(weighted.seen.map((request) => request.headers.get("authorization"))).toEqual(["Bearer sk-router-1", "Bearer sk-router-1", "Bearer sk-router-1", "Bearer sk-router-2"]);
+    const filling = await providersSetup();
+    filling.backend.table = { ...filling.backend.table, settings: routingSettings({ routing: { strategy: "fill-first" } }) };
+    for (let turn = 0; turn < 3; turn += 1) await handle(post("/v1/chat/completions", { model: "deepseek-v3" }), filling.config);
+    expect(filling.seen.map((request) => request.headers.get("authorization"))).toEqual(["Bearer sk-router-1", "Bearer sk-router-1", "Bearer sk-router-1"]);
   });
 
   it("tries the next key when one is rate limited", async () => {
@@ -417,9 +434,9 @@ describe("management API", () => {
 
   it("forgets the cached token after a credential change", async () => {
     const { config } = await setup();
-    config.cache.token = { value: "old", name: "claude-a.json", expiresAt: NOW + 3600, cachedUntil: NOW + 60 };
+    config.cache.tokens.set("claude:", { value: "old", name: "claude-a.json", accountId: "", expiresAt: NOW + 3600, cachedUntil: NOW + 60 });
     await handle(await managementCall("/v8/management/credentials?name=claude-a.json", { authorization: `Bearer ${MANAGEMENT_KEY}` }, { method: "DELETE" }), config);
-    expect(config.cache.token).toBeNull();
+    expect(config.cache.tokens.size).toBe(0);
   });
 });
 
@@ -457,11 +474,11 @@ describe("OAuth callback", () => {
   it("needs sign-in, then hands the code to the store", async () => {
     const { config, backend } = await setup();
     expect((await handle(at("/callback?code=c&state=s"), config)).status).toBe(401);
-    config.cache.token = { value: "old", name: "claude-a.json", expiresAt: NOW + 3600, cachedUntil: NOW + 60 };
+    config.cache.tokens.set("claude:", { value: "old", name: "claude-a.json", accountId: "", expiresAt: NOW + 3600, cachedUntil: NOW + 60 });
     const done = await handle(at("/callback?code=c&state=s", { headers: { cookie: await cookie() } }), config);
     expect(await done.text()).toContain("Login received");
     expect(backend.managed[0]?.url).toBe(`${ORIGIN}/v8/management/oauth/callback?code=c&state=s`);
-    expect(config.cache.token).toBeNull();
+    expect(config.cache.tokens.size).toBe(0);
   });
 
   it("shows the store's error, escaped", async () => {
@@ -528,6 +545,20 @@ describe("CPU budget", () => {
     console.log(`CPU per 600 KB rewritten request: ${gateway.toFixed(2)} ms in the gateway`);
     expect(gateway).toBeLessThan(8);
   });
+
+  it("reads a 600 KB Claude Code request once for routing across two logins, within budget", async () => {
+    const history = Array.from({ length: 400 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: "x".repeat(1500) }));
+    const body = JSON.stringify({ model: "claude-sonnet-5-5", max_tokens: 32000, stream: true, messages: history });
+    const { config, backend } = await setup(async (request) => {
+      await request.arrayBuffer();
+      return new Response("event: message_stop\ndata: {}\n\n", { headers: { "content-type": "text/event-stream" } });
+    });
+    const login = (name: string): LoginEntry => ({ name, provider: "claude", priority: 0, weight: 1, prefix: "", disableCooling: null, requestRetry: null });
+    backend.table = { credentials: [], claudeOAuth: true, codexOAuth: false, logins: [login("a.json"), login("b.json")] };
+    const gateway = await gatewayCpuMs(() => messages({ "x-api-key": KEY }, body), config);
+    console.log(`CPU per 600 KB request across two logins: ${gateway.toFixed(2)} ms in the gateway`);
+    expect(gateway).toBeLessThan(5);
+  });
 });
 
 describe("ChatGPT (Codex) logins", () => {
@@ -574,7 +605,7 @@ describe("ChatGPT (Codex) logins", () => {
     const refused = await codexSetup(async () => new Response("no", { status: 401 }));
     expect((await handle(post("/v1/responses", { model: "gpt-5.5", input: "hi", stream: true }), refused.config)).status).toBe(401);
     expect(refused.backend.invalidated).toEqual(["chatgpt-1"]);
-    expect(refused.config.cache.codexToken).toBeNull();
+    expect(refused.config.cache.tokens.size).toBe(0);
   });
 
   it("leaves Responses requests alone when no ChatGPT login is on", async () => {
@@ -751,5 +782,129 @@ describe("Claude Code on ChatGPT logins and Codex keys", () => {
     // Parsing, translating and re-serialising is the costliest path the gateway has (about 6 ms
     // here), so this gate leaves CI machines some room while still catching a regression.
     expect(gateway).toBeLessThan(9);
+  });
+});
+
+describe("routing across logins and keys", () => {
+  const managementCall = async (path: string, headers: Record<string, string>, init: RequestInit = {}) => at(path, { ...init, headers: { cookie: await cookie(), ...headers } });
+  const sse = (events: unknown[]) => new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+  const login = (name: string, provider: LoginEntry["provider"] = "claude", fields: Partial<LoginEntry> = {}): LoginEntry => ({ name, provider, priority: 0, weight: 1, prefix: "", disableCooling: null, requestRetry: null, ...fields });
+
+  async function loginsSetup(upstream: (request: Request) => Promise<Response>, logins = [login("a.json"), login("b.json")], settings = {}) {
+    const fixture = await setup(upstream);
+    fixture.backend.table = { credentials: [], claudeOAuth: true, codexOAuth: false, logins, settings: routingSettings(settings) };
+    return fixture;
+  }
+
+  const tokenOf = (request: Request | undefined) => request?.headers.get("authorization");
+
+  it("moves on to the next Claude login when one is rate limited, and keeps it out until its cooldown ends", async () => {
+    const limited = async (request: Request) => (tokenOf(request) === "Bearer access-a.json" ? new Response('{"type":"error"}', { status: 429, headers: { "retry-after": "120" } }) : new Response("{}"));
+    const { config, backend, seen, settle } = await loginsSetup(limited);
+    expect((await handle(messages({ "x-api-key": KEY }), config)).status).toBe(200);
+    expect(seen.map(tokenOf)).toEqual(["Bearer access-a.json", "Bearer access-b.json"]);
+    // The next turn would be a.json's, but it is cooling down.
+    expect((await handle(messages({ "x-api-key": KEY }), config)).status).toBe(200);
+    expect(seen.map(tokenOf).slice(2)).toEqual(["Bearer access-b.json"]);
+    await settle();
+    expect(backend.cooled).toEqual([{ id: "file:a.json", model: "", until: NOW + 120, reason: "quota", status: 429, level: 0 }]);
+    expect(backend.recorded[0]?.attempts).toEqual([
+      { key: "file:a.json", ok: false },
+      { key: "file:b.json", ok: true },
+    ]);
+    // Another isolate learns of it from the routing table.
+    const other = { ...config, cache: new EdgeCache() };
+    backend.table = { ...backend.table, cooldowns: backend.cooled.filter((event): event is Cooldown => !("clear" in event)) };
+    await handle(messages({ "x-api-key": KEY }), other);
+    expect(seen.map(tokenOf).slice(3)).toEqual(["Bearer access-b.json"]);
+  });
+
+  it("answers 429 with Retry-After without calling upstream while every credential cools down", async () => {
+    const { config, seen } = await loginsSetup(async () => new Response("{}", { status: 503 }));
+    expect((await handle(messages({ "x-api-key": KEY }), config)).status).toBe(503);
+    expect(seen).toHaveLength(2);
+    const cooling = await handle(messages({ "x-api-key": KEY }), config);
+    expect(cooling.status).toBe(429);
+    expect(cooling.headers.get("retry-after")).toBe("60");
+    expect(await cooling.json()).toMatchObject({ type: "error", error: { type: "rate_limit_error" } });
+    expect(seen).toHaveLength(2);
+  });
+
+  it("returns the last upstream error whole when every credential fails", async () => {
+    const { config } = await loginsSetup(async (request) => Response.json({ type: "error", error: { message: `down for ${tokenOf(request)}` } }, { status: 529 }));
+    const response = await handle(messages({ "x-api-key": KEY }), config);
+    expect(response.status).toBe(529);
+    expect(await response.json()).toMatchObject({ error: { message: "down for Bearer access-b.json" } });
+  });
+
+  it("hands a request error back without trying other credentials or cooling down", async () => {
+    const { config, backend, seen, settle } = await loginsSetup(async () => Response.json({ type: "error" }, { status: 400 }));
+    expect((await handle(messages({ "x-api-key": KEY }), config)).status).toBe(400);
+    expect(seen).toHaveLength(1);
+    await settle();
+    expect(backend.cooled).toEqual([]);
+  });
+
+  it("waits for a short cooldown and runs another round when request-retry allows", async () => {
+    let clock = NOW;
+    const naps: number[] = [];
+    let calls = 0;
+    const { config, backend, seen } = await loginsSetup(async () => (calls++ === 0 ? new Response("{}", { status: 429, headers: { "retry-after": "1" } }) : new Response("{}")), [login("a.json")], {
+      routing: { retry: { "request-retry": 1, "max-retry-interval": 30 } },
+    });
+    const timed = { ...config, nowSeconds: () => clock, sleep: async (ms: number) => { naps.push(ms); clock += ms / 1000; } };
+    // Two logins, so the body is read and the request can be sent again.
+    backend.table = { ...backend.table, logins: [login("a.json"), login("b.json", "claude", { requestRetry: 0 })] };
+    backend.named["b.json"] = { ok: false, status: 503, message: "The login b.json has expired." };
+    const response = await handle(messages({ "x-api-key": KEY }), timed);
+    expect(response.status).toBe(200);
+    // a.json is rate limited, b.json can't get a token, then a.json again after its 10 s floor.
+    expect(naps).toEqual([10_000]);
+    expect(seen.map(tokenOf)).toEqual(["Bearer access-a.json", "Bearer access-a.json"]);
+  });
+
+  it("doesn't wait longer than max-retry-interval", async () => {
+    const naps: number[] = [];
+    const { config, seen } = await loginsSetup(async () => new Response("{}", { status: 429, headers: { "retry-after": "600" } }), undefined, { routing: { retry: { "request-retry": 3, "max-retry-interval": 30 } } });
+    const response = await handle(messages({ "x-api-key": KEY }), { ...config, sleep: async (ms: number) => void naps.push(ms) });
+    expect(response.status).toBe(429);
+    expect(naps).toEqual([]);
+    expect(seen).toHaveLength(2);
+  });
+
+  it("keeps to higher priorities first and leaves disable-cooling logins in rotation", async () => {
+    const { config, seen } = await loginsSetup(async () => new Response("{}", { status: 500 }), [login("low.json"), login("high.json", "claude", { priority: 5, disableCooling: true })]);
+    await handle(messages({ "x-api-key": KEY }), config);
+    expect(seen.map(tokenOf)).toEqual(["Bearer access-high.json", "Bearer access-low.json"]);
+    await handle(messages({ "x-api-key": KEY }), config);
+    expect(seen.map(tokenOf).slice(2)).toEqual(["Bearer access-high.json"]);
+  });
+
+  it("sends prefix/model only to logins with that prefix, with the prefix taken off", async () => {
+    const { config, seen } = await loginsSetup(async () => new Response("{}"), [login("home.json"), login("work.json", "claude", { prefix: "team" })]);
+    const body = '{"model":"team/claude-sonnet-5-5","max_tokens":8,"messages":[]}';
+    expect((await handle(messages({ "x-api-key": KEY }, body), config)).status).toBe(200);
+    expect(tokenOf(seen[0])).toBe("Bearer access-work.json");
+    expect(await seen[0]?.json()).toMatchObject({ model: "claude-sonnet-5-5" });
+  });
+
+  it("fails over between ChatGPT logins too", async () => {
+    const { config, backend, seen } = await setup(async (request) =>
+      tokenOf(request) === "Bearer chatgpt-one.json" ? Response.json({ error: { type: "usage_limit_reached", resets_in_seconds: 3600 } }, { status: 429 }) : sse([{ type: "response.completed", response: { id: "r" } }]),
+    );
+    backend.table = { credentials: [], claudeOAuth: false, codexOAuth: true, logins: [login("one.json", "codex"), login("two.json", "codex")] };
+    expect((await handle(post("/v1/responses", { model: "gpt-5.5", input: "hi" }), config)).status).toBe(200);
+    expect(seen.map((request) => request.headers.get("chatgpt-account-id"))).toEqual(["acct-one.json", "acct-two.json"]);
+    expect(config.cache.cooldowns.find(backend.table, "file:one.json", "")).toMatchObject({ until: NOW + 3600, reason: "quota" });
+  });
+
+  it("forgets this isolate's cooldowns after a dashboard change, such as a cooldown reset", async () => {
+    let refusals = 1;
+    const { config, seen } = await loginsSetup(async (request) => new Response("{}", { status: tokenOf(request) === "Bearer access-a.json" && refusals-- > 0 ? 403 : 200 }));
+    await handle(messages({ "x-api-key": KEY }), config);
+    await handle(await managementCall("/v8/management/routing/cooldown/reset", { authorization: `Bearer ${MANAGEMENT_KEY}` }, { method: "POST", body: '{"auth_index":"a.json"}' }), config);
+    await handle(messages({ "x-api-key": KEY }), config);
+    await handle(messages({ "x-api-key": KEY }), config);
+    expect(seen.map(tokenOf)).toEqual(["Bearer access-a.json", "Bearer access-b.json", "Bearer access-b.json", "Bearer access-a.json"]);
   });
 });

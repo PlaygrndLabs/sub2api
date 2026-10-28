@@ -143,3 +143,64 @@ describe("pages the free install doesn't have", () => {
     expect((await call("GET", "nothing/here")).status).toBe(404);
   });
 });
+
+describe("routing state", () => {
+  it("hands the Worker each login's routing fields, the routing settings and the cooldowns", async () => {
+    const { vault, account, call } = setup();
+    saveLogin(vault, "claude-a.json", "a@example.com");
+    vault.saveCredentialFile("claude-b.json", "claude", { ...claudeFileData({ accessToken: "at-b", refreshToken: "rt-b", expiresAt: NOW + 3600, email: "b@example.com" }), priority: "3", weight: 2, prefix: "work", disable_cooling: true, "request-retry": 2 }, NOW);
+    await call("PUT", "config.yaml", "routing:\n  strategy: fill-first\n  retry:\n    request-retry: 2\n    max-retry-interval: 30\n  cooldown:\n    transient-error-cooldown-seconds: -1\n");
+    await account.cool([{ id: "file:claude-a.json", model: "", until: NOW + 90, reason: "quota", status: 429, level: 1 }]);
+    const table = await account.routing();
+    expect(table.logins).toEqual([
+      { name: "claude-a.json", provider: "claude", priority: 0, weight: 1, prefix: "", disableCooling: null, requestRetry: null },
+      { name: "claude-b.json", provider: "claude", priority: 3, weight: 2, prefix: "work", disableCooling: true, requestRetry: 2 },
+    ]);
+    expect(table.settings).toEqual({ strategy: "fill-first", requestRetry: 2, maxRetryCredentials: 0, maxRetryInterval: 30, disableCooling: false, transientCooldownSeconds: -1 });
+    expect(table.cooldowns).toEqual([{ id: "file:claude-a.json", model: "", until: NOW + 90, reason: "quota", status: 429, level: 1 }]);
+    expect(await account.token("claude-b.json")).toMatchObject({ ok: true, accessToken: "at-b", name: "claude-b.json" });
+    expect(await account.token("missing.json")).toMatchObject({ ok: false, status: 503 });
+  });
+
+  it("keeps the longer of two reports, clears on success, and drops API-key cooldowns on a config edit", async () => {
+    const { account, call } = setup();
+    await account.cool([
+      { id: "file:x.json", model: "m", until: NOW + 600, reason: "not_found", status: 404, level: 0 },
+      { id: "file:x.json", model: "m", until: NOW + 60, reason: "not_found", status: 404, level: 0 },
+      { id: "claude/c/0", model: "", until: NOW + 60, reason: "unauthorized", status: 401, level: 0 },
+    ]);
+    expect((await account.routing()).cooldowns?.map((cooldown) => [cooldown.id, cooldown.until])).toEqual([
+      ["file:x.json", NOW + 600],
+      ["claude/c/0", NOW + 60],
+    ]);
+    await call("PATCH", "config/routing", '{"strategy":"round-robin"}');
+    expect((await account.routing()).cooldowns?.map((cooldown) => cooldown.id)).toEqual(["file:x.json"]);
+    await account.cool([{ id: "file:x.json", clear: true }]);
+    expect((await account.routing()).cooldowns).toEqual([]);
+  });
+
+  it("shows cooldowns on the auth files list and resets them", async () => {
+    const { vault, account, call } = setup();
+    saveLogin(vault, "claude-a.json");
+    await account.cool([
+      { id: "file:claude-a.json", model: "", until: NOW + 90, reason: "quota", status: 429, level: 2 },
+      { id: "file:claude-a.json", model: "claude-x", until: NOW + 30, reason: "not_found", status: 404, level: 0 },
+    ]);
+    const listed = (await (await call("GET", "credentials")).json()) as { files: Record<string, unknown>[] };
+    expect(listed.files[0]).toMatchObject({
+      status: "error",
+      status_message: "quota exhausted",
+      unavailable: true,
+      next_retry_after: new Date((NOW + 90) * 1000).toISOString(),
+      cooldowns: [
+        { scope: "credential", reason: "quota", retry_at: new Date((NOW + 90) * 1000).toISOString(), remaining_seconds: 90, backoff_level: 2, http_status: 429 },
+        { scope: "model", model_key: "claude-x", reason: "not_found", remaining_seconds: 30, http_status: 404 },
+      ],
+    });
+    expect((await call("POST", "routing/cooldown/reset", "{}")).status).toBe(400);
+    expect((await call("POST", "routing/cooldown/reset", '{"auth_index":"nope.json"}')).status).toBe(404);
+    expect(await (await call("POST", "routing/cooldown/reset", '{"auth_index":"claude-a.json"}')).json()).toEqual({ status: "ok", auth_index: "claude-a.json", models: ["claude-x"] });
+    const after = (await (await call("GET", "credentials")).json()) as { files: Record<string, unknown>[] };
+    expect(after.files[0]).toMatchObject({ status: "active", unavailable: false, cooldowns: [] });
+  });
+});

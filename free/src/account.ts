@@ -1,7 +1,8 @@
 import { OAuthError, authorizeUrl, exchangeCode, parseCallback, randomToken, refresh, type Fetcher } from "./claude-oauth.ts";
 import * as codex from "./codex-oauth.ts";
 import { Config } from "./config.ts";
-import { upstreamCredentials, type RoutingTable, type UpstreamCredential } from "./providers.ts";
+import { flagOf, retryOf, upstreamCredentials, weightOf, type LoginEntry, type RoutingTable, type UpstreamCredential } from "./providers.ts";
+import { routingSettings, type CooldownEvent, type RoutingSettings } from "./routing.ts";
 import { storedKey, type UsageRecord } from "./usage.ts";
 import { claudeCredential, claudeFileData, type CredentialFile, type LoginSession, type Vault } from "./vault.ts";
 
@@ -17,13 +18,15 @@ const LABEL: Record<LoginProvider, string> = { claude: "Claude", codex: "ChatGPT
 // state below (config, token refreshes, login sessions) is never raced by another copy.
 export interface Backend {
   keyValid(hash: string): Promise<boolean>;
-  token(): Promise<TokenResult>;
-  codexToken(): Promise<TokenResult>;
+  // A login's token by its file name, or, with no name, the next login's in turn.
+  token(name?: string): Promise<TokenResult>;
+  codexToken(name?: string): Promise<TokenResult>;
   invalidate(accessToken: string): Promise<void>;
   attemptAllowed(client: string): Promise<boolean>;
   manage(request: Request): Promise<Response>;
   routing(): Promise<RoutingTable>;
   record(records: UsageRecord[]): Promise<void>;
+  cool(events: CooldownEvent[]): Promise<void>;
 }
 
 export const REFRESH_MARGIN_SECONDS = 5 * 60;
@@ -34,6 +37,29 @@ interface Login {
   readonly refreshToken: string;
   readonly expiresAt: number;
   readonly accountId: string;
+}
+
+function textOf(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function numberOf(value: unknown): number {
+  const parsed = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : 0;
+}
+
+// CPA reads a login's routing fields from the top level of its auth file.
+function loginEntry(file: CredentialFile): LoginEntry {
+  const data = file.data;
+  return {
+    name: file.name,
+    provider: file.provider === "codex" ? "codex" : "claude",
+    priority: numberOf(data.priority),
+    weight: weightOf(data.weight),
+    prefix: textOf(data.prefix),
+    disableCooling: flagOf(data.disable_cooling ?? data["disable-cooling"]),
+    requestRetry: retryOf(data.request_retry ?? data["request-retry"]),
+  };
 }
 
 function loginOf(file: CredentialFile): Login | null {
@@ -50,6 +76,7 @@ export async function hashKey(key: string): Promise<string> {
 export class Account {
   private config: Config | null = null;
   private upstreams: UpstreamCredential[] | null = null;
+  private settings: RoutingSettings | null = null;
   private keyHashes: Set<string> | null = null;
   private readonly refreshing = new Map<string, Promise<TokenResult>>();
   private readonly lastForcedRefresh = new Map<string, number>();
@@ -71,13 +98,40 @@ export class Account {
     this.config = config;
     this.keyHashes = null;
     this.upstreams = null;
+    this.settings = null;
+    // API-key ids follow their place in the config, so their cooldowns don't outlive an edit.
+    this.vault.clearCooldowns("keys");
   }
 
-  // What the Worker needs to pick an upstream for a request: the configured API-key providers
-  // and whether any Claude login is on.
+  // What the Worker needs to pick an upstream for a request: the configured API-key providers,
+  // the enabled logins, the routing settings and the cooldowns every isolate has reported.
   async routing(): Promise<RoutingTable> {
-    this.upstreams ??= upstreamCredentials(this.currentConfig().read([]));
-    return { credentials: this.upstreams, claudeOAuth: this.loginFiles("claude").length > 0, codexOAuth: this.loginFiles("codex").length > 0 };
+    const tree = this.currentConfig().read([]);
+    this.upstreams ??= upstreamCredentials(tree);
+    this.settings ??= routingSettings(tree);
+    const logins = LOGIN_PROVIDERS.flatMap((provider) => this.loginFiles(provider)).map(loginEntry);
+    return {
+      credentials: this.upstreams,
+      claudeOAuth: logins.some((login) => login.provider === "claude"),
+      codexOAuth: logins.some((login) => login.provider === "codex"),
+      logins,
+      settings: this.settings,
+      cooldowns: this.vault.cooldowns(this.nowSeconds()),
+    };
+  }
+
+  // Cooldowns and successes reported by the Worker's isolates.
+  async cool(events: CooldownEvent[]): Promise<void> {
+    for (const event of events.slice(0, 200)) {
+      if (typeof event?.id !== "string" || event.id === "" || event.id.length > 512) continue;
+      if ("clear" in event) {
+        this.vault.clearCooldowns(event.id);
+        continue;
+      }
+      const until = Math.min(Number(event.until), this.nowSeconds() + 24 * 60 * 60);
+      if (typeof event.model !== "string" || event.model.length > 256 || !Number.isFinite(until)) continue;
+      this.vault.saveCooldown({ id: event.id, model: event.model, until, reason: String(event.reason).slice(0, 64), status: Number(event.status) || 0, level: Math.max(0, Math.min(32, Number(event.level) || 0)) });
+    }
   }
 
   async keyValid(hash: string): Promise<boolean> {
@@ -96,18 +150,24 @@ export class Account {
     return this.loginFiles("claude");
   }
 
-  token(): Promise<TokenResult> {
-    return this.loginToken("claude");
+  token(name?: string): Promise<TokenResult> {
+    return this.loginToken("claude", name);
   }
 
-  codexToken(): Promise<TokenResult> {
-    return this.loginToken("codex");
+  codexToken(name?: string): Promise<TokenResult> {
+    return this.loginToken("codex", name);
   }
 
-  // Picks the provider's next enabled login in turn (round-robin), refreshing it when near expiry.
-  async loginToken(provider: LoginProvider): Promise<TokenResult> {
+  // The named login's token, or the provider's next enabled login in turn (round-robin),
+  // refreshed when near expiry.
+  async loginToken(provider: LoginProvider, name?: string): Promise<TokenResult> {
     const files = this.loginFiles(provider);
     if (files.length === 0) return { ok: false, status: 503, message: `No ${LABEL[provider]} account is connected yet: add one under OAuth login in the dashboard.` };
+    if (name !== undefined) {
+      const file = files.find((candidate) => candidate.name === name);
+      if (file === undefined) return { ok: false, status: 503, message: `That ${LABEL[provider]} login is disabled or was removed.` };
+      return this.tokenFor(file);
+    }
     const turn = this.next.get(provider) ?? 0;
     this.next.set(provider, turn + 1);
     return this.tokenFor(files[turn % files.length] as CredentialFile);

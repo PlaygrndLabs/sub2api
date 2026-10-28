@@ -3,6 +3,7 @@ import { Account, type Backend, type TokenResult } from "./account.ts";
 import type { Env } from "./env.ts";
 import { handleManagement } from "./management.ts";
 import type { RoutingTable } from "./providers.ts";
+import type { CooldownEvent } from "./routing.ts";
 import type { UsageRecord } from "./usage.ts";
 import { Vault } from "./vault.ts";
 
@@ -21,11 +22,11 @@ export class Store extends DurableObject<Env> implements Backend {
   keyValid(hash: string): Promise<boolean> {
     return this.account.keyValid(hash);
   }
-  token(): Promise<TokenResult> {
-    return this.account.token();
+  token(name?: string): Promise<TokenResult> {
+    return this.account.token(name);
   }
-  codexToken(): Promise<TokenResult> {
-    return this.account.codexToken();
+  codexToken(name?: string): Promise<TokenResult> {
+    return this.account.codexToken(name);
   }
   invalidate(accessToken: string): Promise<void> {
     return this.account.invalidate(accessToken);
@@ -41,5 +42,8 @@ export class Store extends DurableObject<Env> implements Backend {
   }
   record(records: UsageRecord[]): Promise<void> {
     return this.account.record(records);
+  }
+  cool(events: CooldownEvent[]): Promise<void> {
+    return this.account.cool(events);
   }
 }
