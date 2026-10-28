@@ -317,12 +317,51 @@ describe("API-key providers", () => {
     expect(seen).toHaveLength(0);
   });
 
-  it("lists configured models in each client's shape", async () => {
-    const { config } = await providersSetup();
-    const openai = (await (await handle(at("/v1/models", { headers: { authorization: `Bearer ${KEY}` } }), config)).json()) as { data: { id: string }[] };
-    expect(openai.data.map((model) => model.id)).toEqual(["kimi", "deepseek-v3"]);
-    const gemini = await (await handle(at(`/v1beta/models?key=${KEY}`), config)).json();
-    expect(gemini).toEqual({ models: [] });
+  it("lists every login's and key's models in each client's shape", async () => {
+    const { config, backend, seen, settle } = await providersSetup(async () => new Response("unavailable", { status: 503 }));
+    backend.table = { ...backend.table, codexOAuth: true, codexPlans: ["free"] };
+    const openai = (await (await handle(at("/v1/models", { headers: { authorization: `Bearer ${KEY}` } }), config)).json()) as { object: string; data: { id: string; object: string; owned_by: string }[] };
+    const ids = openai.data.map((model) => model.id);
+    // The Claude login and the Claude key share CPA's Claude catalog; the key's prefix adds its own names.
+    expect(ids.filter((id) => id === "claude-sonnet-4-6")).toHaveLength(1);
+    expect(ids).toContain("work/claude-sonnet-4-6");
+    // The ChatGPT login lists its plan's catalog, the Codex key Pro's.
+    expect(ids).toContain("gpt-6-luna");
+    expect(ids).toContain("gpt-6-astra");
+    expect(ids).toEqual(expect.arrayContaining(["kimi", "deepseek-v3", "gemini-2.5-flash"]));
+    expect(ids).not.toContain("gemini-2.5-pro");
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(openai.data.find((model) => model.id === "kimi")).toMatchObject({ object: "model", owned_by: "router" });
+    // The catalog refresh runs after the response, and a failed one keeps the embedded catalog.
+    await settle();
+    expect(seen.map((request) => request.url)).toEqual(["https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json"]);
+
+    const claude = (await (await handle(at("/v1/models", { headers: { "x-api-key": KEY, "anthropic-version": "2023-06-01" } }), config)).json()) as { data: { id: string; display_name: string; type: string; max_tokens: number }[]; first_id: string; has_more: boolean };
+    expect(claude.data.map((model) => model.id).sort()).toEqual([...ids].sort());
+    expect(claude.has_more).toBe(false);
+    expect(claude.first_id).toBe(claude.data[0]?.id);
+    const names = claude.data.map((model) => model.display_name);
+    expect(names).toEqual([...names].sort());
+    expect(claude.data.find((model) => model.id === "kimi")).toMatchObject({ type: "model", display_name: "kimi", max_tokens: 64000 });
+
+    const gemini = (await (await handle(at(`/v1beta/models?key=${KEY}`), config)).json()) as { models: { name: string; supportedGenerationMethods: string[] }[] };
+    expect(gemini.models).toHaveLength(ids.length);
+    expect(gemini.models.find((model) => model.name === "models/kimi")?.supportedGenerationMethods).toEqual(["generateContent"]);
+    const one = await handle(at(`/v1beta/models/gemini-2.5-flash?key=${KEY}`), config);
+    expect(await one.json()).toMatchObject({ name: "models/gemini-2.5-flash", displayName: "Gemini 2.5 Flash", inputTokenLimit: 1048576 });
+    expect((await handle(at(`/v1beta/models/%E0%A4%A?key=${KEY}`), config)).status).toBe(404);
+    const missing = await handle(at(`/v1beta/models/gemini-2.5-pro?key=${KEY}`), config);
+    expect(missing.status).toBe(404);
+    expect(((await missing.json()) as { error: { status: string } }).error.status).toBe("NOT_FOUND");
+    // No second catalog download within three hours.
+    expect(seen).toHaveLength(1);
+  });
+
+  it("lists nothing when nothing is configured", async () => {
+    const { config, backend } = await setup();
+    backend.table = { credentials: [], claudeOAuth: false, codexOAuth: false };
+    expect(await (await handle(at("/v1/models", { headers: { authorization: `Bearer ${KEY}` } }), config)).json()).toEqual({ object: "list", data: [] });
+    expect(await (await handle(at("/v1/models", { headers: { "x-api-key": KEY, "anthropic-version": "2023-06-01" } }), config)).json()).toEqual({ data: [], has_more: false, first_id: "", last_id: "" });
   });
 });
 

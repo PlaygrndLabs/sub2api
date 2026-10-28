@@ -143,3 +143,29 @@ describe("pages the free install doesn't have", () => {
     expect((await call("GET", "nothing/here")).status).toBe(404);
   });
 });
+
+describe("model lists", () => {
+  it("lists each login's models and the catalog by channel", async () => {
+    const { call, vault } = setup();
+    saveLogin(vault, "claude-me@example.com.json");
+    vault.saveCredentialFile("codex-me-free.json", "codex", { type: "codex", access_token: "at", refresh_token: "rt", plan_type: "free" }, NOW);
+    const claude = (await (await call("GET", "credentials/models?name=claude-me%40example.com.json")).json()) as { models: { id: string; owned_by: string }[] };
+    expect(claude.models.length).toBeGreaterThan(0);
+    expect(claude.models.every((model) => model.id.startsWith("claude-") && model.owned_by === "anthropic")).toBe(true);
+    const codex = (await (await call("GET", "credentials/models?name=codex-me-free.json")).json()) as { models: { id: string }[] };
+    expect(codex.models.map((model) => model.id)).not.toContain("gpt-6-astra");
+    expect(codex.models.map((model) => model.id)).toContain("gpt-6-luna");
+    vault.setCredentialStatus("codex-me-free.json", true, "", NOW);
+    expect(await (await call("GET", "credentials/models?name=codex-me-free.json")).json()).toEqual({ models: [] });
+    expect((await call("GET", "credentials/models?name=missing.json")).status).toBe(404);
+
+    const definitions = (await (await call("GET", "routing/model-definitions/Codex")).json()) as { channel: string; models: { id: string; object: string }[] };
+    expect(definitions.channel).toBe("codex");
+    expect(definitions.models.map((model) => model.id)).toContain("gpt-6-astra");
+    expect(definitions.models[0]?.object).toBe("model");
+    expect((await (await call("GET", "routing/model-definitions/gemini")).json()) as { models: unknown[] }).toMatchObject({ channel: "gemini" });
+    const unknown = await call("GET", "routing/model-definitions/kimi");
+    expect(unknown.status).toBe(400);
+    expect(await unknown.json()).toEqual({ error: "unknown channel", channel: "kimi" });
+  });
+});
