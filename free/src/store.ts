@@ -28,8 +28,8 @@ export class Store extends DurableObject<Env> implements Backend {
   codexToken(name?: string): Promise<TokenResult> {
     return this.account.codexToken(name);
   }
-  loginToken(provider: ServedLogin): Promise<TokenResult> {
-    return this.account.loginToken(provider);
+  loginToken(provider: ServedLogin, name?: string): Promise<TokenResult> {
+    return this.account.loginToken(provider, name);
   }
   invalidate(accessToken: string): Promise<void> {
     return this.account.invalidate(accessToken);

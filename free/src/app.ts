@@ -45,7 +45,8 @@ export class EdgeCache {
   readonly keys = new Map<string, number>();
   // Login tokens by "<provider>:<login name>"; the name is empty for "the next login in turn".
   readonly tokens = new Map<string, CachedToken>();
-  readonly logins = new Map<ServedLogin, { value: string; name: string; endpoint: string; headers: Record<string, string>; expiresAt: number; cachedUntil: number }>();
+  // Kimi and Vertex tokens and endpoints by "<provider>:<login name>", like `tokens`.
+  readonly logins = new Map<string, { value: string; name: string; endpoint: string; headers: Record<string, string>; expiresAt: number; cachedUntil: number }>();
   routing: { table: RoutingTable; until: number } | null = null;
   readonly cooldowns = new CooldownBook();
   readonly catalog = new CatalogCache();
@@ -171,15 +172,17 @@ interface LoginAccess {
   readonly headers: Record<string, string>;
 }
 
-async function loginAccess(config: AppConfig, provider: ServedLogin): Promise<LoginAccess | { status: number; message: string }> {
-  const cached = config.cache.logins.get(provider);
+// An empty name asks for the next login in turn.
+async function loginAccess(config: AppConfig, provider: ServedLogin, name: string): Promise<LoginAccess | { status: number; message: string }> {
+  const key = tokenKey(provider, name);
+  const cached = config.cache.logins.get(key);
   const now = config.nowSeconds();
   if (cached !== undefined && cached.cachedUntil > now && cached.expiresAt - now > REFRESH_MARGIN_SECONDS) return { token: cached.value, endpoint: cached.endpoint, headers: cached.headers };
-  const result = await config.backend.loginToken(provider);
+  const result = await config.backend.loginToken(provider, name === "" ? undefined : name);
   if (!result.ok) return { status: result.status, message: result.message };
   const endpoint = result.endpoint ?? "";
   const headers = result.headers ?? {};
-  config.cache.logins.set(provider, { value: result.accessToken, name: result.name ?? "", endpoint, headers, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS });
+  config.cache.logins.set(key, { value: result.accessToken, name: result.name ?? name, endpoint, headers, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS });
   return { token: result.accessToken, endpoint, headers };
 }
 
@@ -400,25 +403,29 @@ function anyLogin(provider: LoginEntry["provider"]): LoginEntry {
 
 function loginsOf(table: RoutingTable): readonly LoginEntry[] {
   if (table.logins !== undefined) return table.logins;
-  return [...(table.claudeOAuth ? [anyLogin("claude")] : []), ...(table.codexOAuth ? [anyLogin("codex")] : [])];
+  const any = [table.claudeOAuth, table.codexOAuth, table.kimiOAuth === true, table.vertexOAuth === true];
+  return (["claude", "codex", "kimi", "vertex"] as const).filter((_, index) => any[index]).map(anyLogin);
 }
 
 // Kimi and Vertex logins are served like an API key of their provider, once their endpoint and
-// token are known. The Durable Object picks one in turn, so they are one candidate per provider.
+// token are known. Each is a candidate of its own, with id "file:<login name>" like the others.
 const SERVED_GROUP = "oauth-served";
 
-function servedCandidate(kind: ServedLogin, model: string): Candidate {
-  // Without per-login candidates, a cooldown would rest every login of the provider, so none is set.
-  return { model, credential: { id: `${kind}-login`, kind, group: SERVED_GROUP, baseUrl: "", apiKey: "", weight: 1, priority: 0, prefix: "", headers: {}, models: [], excluded: [], disableCooling: true, requestRetry: null } };
+function servedCandidate(login: LoginEntry, model: string): Candidate {
+  const { credential } = loginCandidate(login, model);
+  return { model, credential: { ...credential, group: SERVED_GROUP, baseUrl: "" } };
 }
 
-function servedOf(candidate: Candidate): ServedLogin | null {
+// The provider and login file of a Kimi or Vertex candidate ("" for the next login in turn).
+function servedOf(candidate: Candidate): { provider: ServedLogin; name: string } | null {
   if (candidate.credential.group !== SERVED_GROUP) return null;
-  return candidate.credential.kind === "kimi" || candidate.credential.kind === "vertex" ? candidate.credential.kind : null;
+  const provider = candidate.credential.kind;
+  if (provider !== "kimi" && provider !== "vertex") return null;
+  return { provider, name: candidate.credential.id.slice("file:".length) };
 }
 
-async function servedLogin(config: AppConfig, candidate: Candidate, provider: ServedLogin): Promise<{ candidate: Candidate; token: string } | { status: number; message: string }> {
-  const access = await loginAccess(config, provider);
+async function servedLogin(config: AppConfig, candidate: Candidate, provider: ServedLogin, name: string): Promise<{ candidate: Candidate; token: string } | { status: number; message: string }> {
+  const access = await loginAccess(config, provider, name);
   if (!("token" in access)) return access;
   return { token: access.token, candidate: { ...candidate, credential: { ...candidate.credential, baseUrl: access.endpoint, headers: { ...access.headers, authorization: `Bearer ${access.token}` } } } };
 }
@@ -470,7 +477,7 @@ function noteAttempt(trace: Trace, config: AppConfig, candidate: Candidate, stat
   } else {
     const served = servedOf(candidate);
     if (served !== null) {
-      const name = config.cache.logins.get(served)?.name ?? "";
+      const name = served.name || (config.cache.logins.get(tokenKey(served.provider, ""))?.name ?? "");
       key = name === "" ? null : loginKey(name);
     }
   }
@@ -489,8 +496,9 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   const logins = loginsOf(table);
   const claudeLogins = logins.filter((login) => login.provider === "claude");
   const codexLogins = logins.filter((login) => login.provider === "codex");
+  const servedLogins = logins.filter((login) => login.provider === "kimi" || login.provider === "vertex");
   // Claude clients with one Claude login and nothing else: stream the body through unread.
-  if (route.format === "claude" && claudeLogins.length === 1 && codexLogins.length === 0 && !table.vertexOAuth && !table.kimiOAuth && table.credentials.length === 0) {
+  if (route.format === "claude" && claudeLogins.length === 1 && codexLogins.length === 0 && servedLogins.length === 0 && table.credentials.length === 0) {
     const only = loginCandidate(claudeLogins[0] as LoginEntry, "");
     const response = await viaClaudeLogin(request, url, config, undefined, loginName(only) ?? "");
     noteAttempt(trace, config, only, response.status);
@@ -509,17 +517,18 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   const usable = [...found];
   // "prefix/model" picks the logins with that prefix; other names may use any login.
   const { prefix, model: bare } = splitModel(table, model);
-  const loginsFor = (provider: LoginEntry["provider"]) => (provider === "claude" ? claudeLogins : codexLogins).filter((login) => prefix === "" || login.prefix === prefix).map((login) => loginCandidate(login, bare));
+  const loginsFor = (provider: LoginEntry["provider"], upstreamModel = bare) =>
+    logins.filter((login) => login.provider === provider && (prefix === "" || login.prefix === prefix)).map((login) => (provider === "kimi" || provider === "vertex" ? servedCandidate(login, upstreamModel) : loginCandidate(login, upstreamModel)));
   if (route.format === "claude" && /^claude-/i.test(bare)) usable.push(...loginsFor("claude"));
   // ChatGPT logins take Codex's own models, and any Responses model nothing else serves.
   if (route.format === "openai-response" && (inDefaultFamily("codex", bare) || usable.length === 0)) usable.push(...loginsFor("codex"));
   // Claude Code or a Chat client asking for a ChatGPT model by name, e.g. ANTHROPIC_MODEL=gpt-5.6-sol.
   if ((route.format === "claude" || route.format === "openai") && inDefaultFamily("codex", bare)) usable.push(...loginsFor("codex"));
   // Vertex service accounts take Gemini models, from any client, translated where needed.
-  if (table.vertexOAuth === true && inDefaultFamily("vertex", model)) usable.push(servedCandidate("vertex", model));
+  if (inDefaultFamily("vertex", bare)) usable.push(...loginsFor("vertex"));
   // Kimi logins take Kimi's models in Anthropic and both OpenAI formats untranslated, and
   // Gemini clients through Anthropic Messages.
-  if (table.kimiOAuth === true && inDefaultFamily("kimi", model)) usable.push(servedCandidate("kimi", kimiUpstreamModel(model)));
+  if (inDefaultFamily("kimi", bare)) usable.push(...loginsFor("kimi", kimiUpstreamModel(bare)));
   if (usable.length === 0) {
     if (route.format === "claude" && table.claudeOAuth) {
       const response = await viaClaudeLogin(request, url, config, text);
@@ -539,7 +548,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
     let servedToken = "";
     const served = servedOf(attempt);
     if (served !== null) {
-      const resolved = await servedLogin(attemptConfig, attempt, served);
+      const resolved = await servedLogin(attemptConfig, attempt, served.provider, served.name);
       if (!("token" in resolved)) return formatError(route.format, resolved.status, "api_error", resolved.message);
       candidate = resolved.candidate;
       servedToken = resolved.token;
@@ -558,7 +567,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
     }
     // The provider refused a served login's token: the Durable Object gets a new one, at most once a minute.
     if (response.status === 401 && served !== null) {
-      config.cache.logins.delete(served);
+      config.cache.logins.delete(tokenKey(served.provider, served.name));
       await config.backend.invalidate(servedToken);
     }
     return response;
@@ -573,7 +582,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
     book: config.cache.cooldowns,
     nowSeconds: config.nowSeconds,
     sleep: config.sleep ?? sleep,
-    isLogin: (candidate) => loginName(candidate) !== null,
+    isLogin: (candidate) => loginName(candidate) !== null || servedOf(candidate) !== null,
     attempt: async (candidate) => {
       // The upstream's own answer carries the wait hint, whatever shape the client gets back.
       let hint: Promise<number | null> = Promise.resolve(null);
