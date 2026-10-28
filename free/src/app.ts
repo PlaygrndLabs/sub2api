@@ -1,5 +1,6 @@
 import { hashKey, REFRESH_MARGIN_SECONDS, type Backend } from "./account.ts";
 import type { Fetcher } from "./claude-oauth.ts";
+import { claudeToGemini, geminiClaudeMessage, GeminiClaudeStream } from "./claude-gemini.ts";
 import { chatClaudeMessage, ChatClaudeStream, claudeToChat } from "./claude-openai.ts";
 import { claudeEventStream, claudeMessage, ClaudeStream, claudeToResponses } from "./claude-responses.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
@@ -187,10 +188,11 @@ async function viaCodexLogin(request: Request, url: URL, config: AppConfig, text
   return collected(upstream);
 }
 
-// Formats a provider takes with translation: Claude clients can reach Responses and Chat upstreams.
+// Formats a provider takes with translation: Claude clients can reach Responses, Chat and
+// Gemini upstreams.
 function servable(format: Format, kind: Candidate["credential"]["kind"]): boolean {
   const native = NATIVE_FORMAT[kind];
-  return native === format || (format === "claude" && (native === "openai-response" || native === "openai"));
+  return native === format || (format === "claude" && (native === "openai-response" || native === "openai" || native === "gemini"));
 }
 
 function parsedObject(text: string): Record<string, unknown> | null {
@@ -211,17 +213,16 @@ async function upstreamMessage(upstream: Response): Promise<string> {
   return `The upstream answered ${upstream.status}.`;
 }
 
-// A Claude request served by a Responses upstream (a ChatGPT login or a Codex key) or a Chat
-// Completions one (an OpenAI-compatible key): the body is translated, and the answer translated
-// back, streamed or whole.
+// A Claude request served by a Responses upstream (a ChatGPT login or a Codex key), a Chat
+// Completions one (an OpenAI-compatible key) or Gemini (a Gemini key): the body is translated,
+// and the answer translated back, streamed or whole.
 async function viaTranslation(request: Request, url: URL, route: Route, config: AppConfig, candidate: Candidate, text: string): Promise<Response> {
   const claude = parsedObject(text);
   if (claude === null) return formatError("claude", 400, "invalid_request_error", "The request body must be a JSON object.");
   if (url.pathname.endsWith("/count_tokens")) return Response.json({ input_tokens: Math.ceil(text.length / 4) }, { headers: { "cache-control": "no-store" } });
   const requested = typeof claude.model === "string" ? claude.model : candidate.model;
-  const chat = NATIVE_FORMAT[candidate.credential.kind] === "openai";
-  const responses = chat ? null : await claudeToResponses(claude, candidate.model);
-  const translated = chat ? claudeToChat(claude, candidate.model) : (responses as NonNullable<typeof responses>);
+  const native = NATIVE_FORMAT[candidate.credential.kind];
+  const translated = native === "openai" ? { ...claudeToChat(claude, candidate.model), toolNames: new Map<string, string>() } : native === "gemini" ? claudeToGemini(claude, candidate.model) : await claudeToResponses(claude, candidate.model);
   const body = JSON.stringify(translated.body);
   // The client's own headers describe a Claude request, so none of them go upstream.
   const bare = new Request(request.url, { method: "POST" });
@@ -232,8 +233,13 @@ async function viaTranslation(request: Request, url: URL, route: Route, config: 
     if (access instanceof Response) return formatError("claude", access.status, "api_error", await upstreamMessage(access));
     accessToken = access.token;
     upstream = await config.upstream(codexRequest(bare, access.token, access.accountId, body)).catch(() => null);
+  } else if (native === "gemini") {
+    const geminiRoute: Route = { ...route, format: "gemini", geminiAction: translated.stream ? "streamGenerateContent" : "generateContent" };
+    const target = new URL(request.url);
+    target.search = translated.stream ? "?alt=sse" : "";
+    upstream = await config.upstream(providerRequest(bare, target, geminiRoute, candidate.credential, candidate.model, body)).catch(() => null);
   } else {
-    const upstreamRoute: Route = { ...route, format: NATIVE_FORMAT[candidate.credential.kind] };
+    const upstreamRoute: Route = { ...route, format: native };
     upstream = await config.upstream(providerRequest(bare, url, upstreamRoute, candidate.credential, candidate.model, body)).catch(() => null);
   }
   if (upstream === null) return formatError("claude", 502, "api_error", "The upstream couldn't be reached.");
@@ -245,17 +251,18 @@ async function viaTranslation(request: Request, url: URL, route: Route, config: 
     return formatError("claude", upstream.status, upstream.status === 429 ? "rate_limit_error" : "api_error", await upstreamMessage(upstream));
   }
   if (translated.stream && upstream.body !== null) {
-    const translator = responses === null ? new ChatClaudeStream(requested) : new ClaudeStream(requested, responses.toolNames);
+    const translator = native === "openai" ? new ChatClaudeStream(requested) : native === "gemini" ? new GeminiClaudeStream(requested, translated.toolNames) : new ClaudeStream(requested, translated.toolNames);
     return new Response(claudeEventStream(upstream.body, translator), { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" } });
   }
-  if (responses === null) {
+  if (native === "openai" || native === "gemini") {
     const final = parsedObject(await upstream.text());
     if (final === null) return formatError("claude", 502, "api_error", "The upstream sent a response that isn't JSON.");
-    return Response.json(chatClaudeMessage(final, requested), { headers: { "cache-control": "no-store" } });
+    const message = native === "openai" ? chatClaudeMessage(final, requested) : geminiClaudeMessage(final, requested, translated.toolNames);
+    return Response.json(message, { headers: { "cache-control": "no-store" } });
   }
   const final = await collected(upstream);
   if (!final.ok) return formatError("claude", final.status, "api_error", await upstreamMessage(final));
-  return Response.json(claudeMessage((await final.json()) as Record<string, unknown>, requested, responses.toolNames), { headers: { "cache-control": "no-store" } });
+  return Response.json(claudeMessage((await final.json()) as Record<string, unknown>, requested, translated.toolNames), { headers: { "cache-control": "no-store" } });
 }
 
 // Statuses after which another credential may well succeed.

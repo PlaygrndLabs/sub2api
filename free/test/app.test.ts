@@ -637,6 +637,31 @@ describe("Claude Code on ChatGPT logins and Codex keys", () => {
     expect(await sent?.json()).toMatchObject({ model: "vendor/kimi-k2:free", stream: true, messages: [{ role: "user", content: "hi" }] });
   });
 
+  it("serves Claude Code from a Gemini key through the Gemini translator, streamed and whole", async () => {
+    const parts = [{ text: "Hi" }];
+    const { config, seen } = await providersSetup(async (request) =>
+      new URL(request.url).searchParams.get("alt") === "sse"
+        ? new Response(`data: ${JSON.stringify({ responseId: "r1", candidates: [{ content: { parts }, finishReason: "STOP" }] })}\r\n\r\n`, { headers: { "content-type": "text/event-stream" } })
+        : Response.json({ responseId: "r2", candidates: [{ content: { parts }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 1 } }),
+    );
+    const streamed = await handle(messages({ "x-api-key": KEY, "anthropic-beta": "b" }, '{"model":"gemini-2.5-flash","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'), config);
+    const text = await streamed.text();
+    expect(text).toContain('"text_delta","text":"Hi"');
+    expect(text).toContain("message_stop");
+    const [sent] = seen;
+    expect(sent?.url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse");
+    expect(sent?.headers.get("x-goog-api-key")).toBe("AIza-1");
+    expect(sent?.headers.get("x-api-key")).toBeNull();
+    expect(sent?.headers.get("anthropic-beta")).toBeNull();
+    expect(await sent?.json()).toEqual({ contents: [{ role: "user", parts: [{ text: "hi" }] }], generationConfig: { maxOutputTokens: 64 } });
+    const whole = await handle(messages({ "x-api-key": KEY }, '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hi"}]}'), config);
+    expect(seen[1]?.url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent");
+    expect(await whole.json()).toMatchObject({ id: "msg_r2", content: [{ type: "text", text: "Hi" }], stop_reason: "end_turn", usage: { input_tokens: 4, output_tokens: 1 } });
+    // Excluded models stay excluded through the translator too.
+    await handle(messages({ "x-api-key": KEY }, '{"model":"gemini-2.5-pro","messages":[]}'), config);
+    expect(seen[2]?.url).not.toContain("generativelanguage");
+  });
+
   it("translates a 600 KB Claude Code request within the CPU budget", async () => {
     const history = Array.from({ length: 400 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: [{ type: "text", text: "x".repeat(1500) }] }));
     const tools = Array.from({ length: 30 }, (_, index) => ({ name: `tool_${index}`, description: "d".repeat(300), input_schema: { type: "object", properties: { a: { type: "string" } } } }));
