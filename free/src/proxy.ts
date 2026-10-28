@@ -210,6 +210,7 @@ export function formatError(format: Format | "models", status: number, type: str
 function geminiStatus(status: number): string {
   if (status === 400) return "INVALID_ARGUMENT";
   if (status === 401) return "UNAUTHENTICATED";
+  if (status === 403) return "PERMISSION_DENIED";
   if (status === 404) return "NOT_FOUND";
   if (status === 405) return "METHOD_NOT_ALLOWED";
   if (status === 429) return "RESOURCE_EXHAUSTED";
