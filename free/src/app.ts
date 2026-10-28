@@ -1,7 +1,9 @@
 import { hashKey, REFRESH_MARGIN_SECONDS, type Backend } from "./account.ts";
 import type { Fetcher } from "./claude-oauth.ts";
+import { claudeToGemini, geminiClaudeMessage, GeminiClaudeStream } from "./claude-gemini.ts";
 import { chatClaudeMessage, ChatClaudeStream, claudeToChat } from "./claude-openai.ts";
 import { claudeEventStream, claudeMessage, ClaudeStream, claudeToResponses } from "./claude-responses.ts";
+import { chatCompletion, ChatStream, chatToClaude } from "./openai-claude.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
 import { loginPage, messagePage } from "./pages.ts";
 import { candidates, inDefaultFamily, listedModels, NATIVE_FORMAT, ordered, type Candidate, type Format, type RoutingTable } from "./providers.ts";
@@ -187,10 +189,13 @@ async function viaCodexLogin(request: Request, url: URL, config: AppConfig, text
   return collected(upstream);
 }
 
-// Formats a provider takes with translation: Claude clients can reach Responses and Chat upstreams.
+// Formats a provider takes with translation: Claude clients can reach Responses, Chat and
+// Gemini upstreams, and OpenAI Chat clients can reach Claude API keys.
 function servable(format: Format, kind: Candidate["credential"]["kind"]): boolean {
   const native = NATIVE_FORMAT[kind];
-  return native === format || (format === "claude" && (native === "openai-response" || native === "openai"));
+  if (native === format) return true;
+  if (format === "claude") return native === "openai-response" || native === "openai" || native === "gemini";
+  return format === "openai" && native === "claude";
 }
 
 function parsedObject(text: string): Record<string, unknown> | null {
@@ -211,17 +216,16 @@ async function upstreamMessage(upstream: Response): Promise<string> {
   return `The upstream answered ${upstream.status}.`;
 }
 
-// A Claude request served by a Responses upstream (a ChatGPT login or a Codex key) or a Chat
-// Completions one (an OpenAI-compatible key): the body is translated, and the answer translated
-// back, streamed or whole.
+// A Claude request served by a Responses upstream (a ChatGPT login or a Codex key), a Chat
+// Completions one (an OpenAI-compatible key) or Gemini (a Gemini key): the body is translated,
+// and the answer translated back, streamed or whole.
 async function viaTranslation(request: Request, url: URL, route: Route, config: AppConfig, candidate: Candidate, text: string): Promise<Response> {
   const claude = parsedObject(text);
   if (claude === null) return formatError("claude", 400, "invalid_request_error", "The request body must be a JSON object.");
   if (url.pathname.endsWith("/count_tokens")) return Response.json({ input_tokens: Math.ceil(text.length / 4) }, { headers: { "cache-control": "no-store" } });
   const requested = typeof claude.model === "string" ? claude.model : candidate.model;
-  const chat = NATIVE_FORMAT[candidate.credential.kind] === "openai";
-  const responses = chat ? null : await claudeToResponses(claude, candidate.model);
-  const translated = chat ? claudeToChat(claude, candidate.model) : (responses as NonNullable<typeof responses>);
+  const native = NATIVE_FORMAT[candidate.credential.kind];
+  const translated = native === "openai" ? { ...claudeToChat(claude, candidate.model), toolNames: new Map<string, string>() } : native === "gemini" ? claudeToGemini(claude, candidate.model) : await claudeToResponses(claude, candidate.model);
   const body = JSON.stringify(translated.body);
   // The client's own headers describe a Claude request, so none of them go upstream.
   const bare = new Request(request.url, { method: "POST" });
@@ -232,8 +236,13 @@ async function viaTranslation(request: Request, url: URL, route: Route, config: 
     if (access instanceof Response) return formatError("claude", access.status, "api_error", await upstreamMessage(access));
     accessToken = access.token;
     upstream = await config.upstream(codexRequest(bare, access.token, access.accountId, body)).catch(() => null);
+  } else if (native === "gemini") {
+    const geminiRoute: Route = { ...route, format: "gemini", geminiAction: translated.stream ? "streamGenerateContent" : "generateContent" };
+    const target = new URL(request.url);
+    target.search = translated.stream ? "?alt=sse" : "";
+    upstream = await config.upstream(providerRequest(bare, target, geminiRoute, candidate.credential, candidate.model, body)).catch(() => null);
   } else {
-    const upstreamRoute: Route = { ...route, format: NATIVE_FORMAT[candidate.credential.kind] };
+    const upstreamRoute: Route = { ...route, format: native };
     upstream = await config.upstream(providerRequest(bare, url, upstreamRoute, candidate.credential, candidate.model, body)).catch(() => null);
   }
   if (upstream === null) return formatError("claude", 502, "api_error", "The upstream couldn't be reached.");
@@ -245,17 +254,39 @@ async function viaTranslation(request: Request, url: URL, route: Route, config: 
     return formatError("claude", upstream.status, upstream.status === 429 ? "rate_limit_error" : "api_error", await upstreamMessage(upstream));
   }
   if (translated.stream && upstream.body !== null) {
-    const translator = responses === null ? new ChatClaudeStream(requested) : new ClaudeStream(requested, responses.toolNames);
+    const translator = native === "openai" ? new ChatClaudeStream(requested) : native === "gemini" ? new GeminiClaudeStream(requested, translated.toolNames) : new ClaudeStream(requested, translated.toolNames);
     return new Response(claudeEventStream(upstream.body, translator), { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" } });
   }
-  if (responses === null) {
+  if (native === "openai" || native === "gemini") {
     const final = parsedObject(await upstream.text());
     if (final === null) return formatError("claude", 502, "api_error", "The upstream sent a response that isn't JSON.");
-    return Response.json(chatClaudeMessage(final, requested), { headers: { "cache-control": "no-store" } });
+    const message = native === "openai" ? chatClaudeMessage(final, requested) : geminiClaudeMessage(final, requested, translated.toolNames);
+    return Response.json(message, { headers: { "cache-control": "no-store" } });
   }
   const final = await collected(upstream);
   if (!final.ok) return formatError("claude", final.status, "api_error", await upstreamMessage(final));
-  return Response.json(claudeMessage((await final.json()) as Record<string, unknown>, requested, responses.toolNames), { headers: { "cache-control": "no-store" } });
+  return Response.json(claudeMessage((await final.json()) as Record<string, unknown>, requested, translated.toolNames), { headers: { "cache-control": "no-store" } });
+}
+
+// An OpenAI Chat request served by a Claude API key: the body is translated to Anthropic
+// Messages, and the answer translated back, streamed or whole.
+async function viaClaudeKey(request: Request, config: AppConfig, candidate: Candidate, text: string): Promise<Response> {
+  const chat = parsedObject(text);
+  if (chat === null) return formatError("openai", 400, "invalid_request_error", "The request body must be a JSON object.");
+  const requested = typeof chat.model === "string" ? chat.model : candidate.model;
+  const translated = chatToClaude(chat, candidate.model);
+  // The client's own headers describe an OpenAI request, so none of them go upstream.
+  const bare = new Request(request.url, { method: "POST" });
+  const target = new URL("/v1/messages", request.url);
+  const upstream = await config.upstream(providerRequest(bare, target, { method: "POST", format: "claude" }, candidate.credential, candidate.model, JSON.stringify(translated.body))).catch(() => null);
+  if (upstream === null) return formatError("openai", 502, "api_error", "The upstream couldn't be reached.");
+  if (!upstream.ok) return formatError("openai", upstream.status, upstream.status === 429 ? "rate_limit_error" : "api_error", await upstreamMessage(upstream));
+  if (translated.stream && upstream.body !== null) {
+    return new Response(claudeEventStream(upstream.body, new ChatStream(requested, translated.toolNames)), { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" } });
+  }
+  const final = parsedObject(await upstream.text());
+  if (final === null) return formatError("openai", 502, "api_error", "The upstream sent a response that isn't JSON.");
+  return Response.json(chatCompletion(final, requested, translated.toolNames), { headers: { "cache-control": "no-store" } });
 }
 
 // Statuses after which another credential may well succeed.
@@ -321,8 +352,11 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   if (route.format === "claude" && table.codexOAuth && inDefaultFamily("codex", model)) usable.push(loginCandidate("codex", model));
   if (usable.length === 0) {
     if (route.format === "claude" && table.claudeOAuth) return viaClaudeLogin(request, url, config, text);
+    // Without CPA's cloaking a Claude login serves Claude Code only, so it isn't offered here.
     const reason =
-      found.length > 0
+      route.format === "openai" && table.claudeOAuth && /^claude-/i.test(model)
+        ? `Claude logins serve Claude Code only. To use ${model} from an OpenAI client, add a Claude API key under AI Providers in the dashboard.`
+        : found.length > 0
         ? `Model ${model} is served by a ${found[0]?.credential.kind} provider, which doesn't take this request format yet.`
         : `No provider is configured for model ${model}. Add one under AI Providers in the dashboard.`;
     return formatError(route.format, 400, "invalid_request_error", reason);
@@ -336,7 +370,8 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
     const translated = route.format !== NATIVE_FORMAT[candidate.credential.kind];
     if (translated || candidate.credential.id === CLAUDE_LOGIN_ID || candidate.credential.id === CODEX_LOGIN_ID) {
       let response: Response;
-      if (translated) response = await viaTranslation(request, url, route, config, candidate, text);
+      if (translated && route.format === "openai") response = await viaClaudeKey(request, config, candidate, text);
+      else if (translated) response = await viaTranslation(request, url, route, config, candidate, text);
       else if (candidate.credential.id === CLAUDE_LOGIN_ID) response = await viaClaudeLogin(request, url, config, body);
       else response = await viaCodexLogin(request, url, config, body);
       if (isLast || !RETRY_STATUSES.has(response.status)) return response;
@@ -365,7 +400,7 @@ async function modelList(request: Request, url: URL, config: AppConfig): Promise
   // Anthropic SDKs and Claude Code get Anthropic's shape, as in CPA; everyone else OpenAI's.
   const anthropic = request.headers.has("anthropic-version") || (request.headers.get("user-agent") ?? "").startsWith("claude-cli");
   if (!anthropic) {
-    const data = listed.filter((model) => model.kind !== "claude" && model.kind !== "gemini").map((model) => ({ id: model.id, object: "model", created: 0, owned_by: model.kind }));
+    const data = listed.filter((model) => model.kind !== "gemini").map((model) => ({ id: model.id, object: "model", created: 0, owned_by: model.kind }));
     return Response.json({ object: "list", data }, { headers });
   }
   const extra = listed.filter((model) => model.kind === "claude").map((model) => ({ type: "model", id: model.id, display_name: model.id, created_at: "1970-01-01T00:00:00Z" }));
