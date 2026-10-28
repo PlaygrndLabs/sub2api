@@ -7,8 +7,9 @@ import { chatCompletion, ChatStream, chatToClaude } from "./openai-claude.ts";
 import { geminiResponse, GeminiStream, geminiToClaude } from "./gemini-claude.ts";
 import { kimiUpstreamModel } from "./kimi-oauth.ts";
 import { responsesResponse, ResponsesStream, responsesToClaude } from "./responses-claude.ts";
+import { codexModelCatalog } from "./codex-models.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
-import { availableModels, CatalogCache, claudeModelList, geminiModel, geminiModelList, openaiModelList } from "./models.ts";
+import { CatalogCache, claudeModelList, geminiModel, geminiModelList, openaiModelList, servedModels } from "./models.ts";
 import { loginPage, messagePage } from "./pages.ts";
 import { candidates, inDefaultFamily, NATIVE_FORMAT, splitModel, takesNatively, type Candidate, type Format, type LoginEntry, type RoutingTable } from "./providers.ts";
 import { CODEX_UPSTREAM, codexRequest, downstreamResponse, formatError, presentedKey, providerRequest, routeOf, upstreamRequest, UPSTREAM, type Route } from "./proxy.ts";
@@ -607,8 +608,13 @@ async function modelList(request: Request, url: URL, route: Route, config: AppCo
   // CPA's catalog refreshes after the response, so no request waits for it.
   const refreshing = config.cache.catalog.refresh(config.upstream, config.nowSeconds());
   if (refreshing !== null) config.waitUntil?.(refreshing);
-  const models = availableModels(table, config.cache.catalog.current(), config.nowSeconds());
+  const served = servedModels(table, config.cache.catalog.current(), config.nowSeconds());
   const headers = { "cache-control": "no-store" };
+  // The Codex CLI's own catalog format, which it asks for when model_catalog_url points here.
+  if (url.pathname === "/v1/models" && url.searchParams.has("client_version")) {
+    return new Response(codexModelCatalog(served, url.searchParams.get("client_version") ?? ""), { headers: { ...headers, "content-type": "application/json; charset=utf-8" } });
+  }
+  const models = served.map((entry) => entry.model);
   if (route.geminiModel !== undefined) {
     const found = models.find((model) => model.id === route.geminiModel);
     if (found === undefined) return formatError("gemini", 404, "not_found", `Model ${route.geminiModel} isn't served here.`);
