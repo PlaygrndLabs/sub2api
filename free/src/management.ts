@@ -3,6 +3,7 @@ import { OAuthError } from "./claude-oauth.ts";
 import { Config, ConfigError, configTag, ifMatchSatisfied } from "./config.ts";
 import { codexChannel, definition, definitionChannel, type Catalog } from "./models.ts";
 import { apiKeyKey, apiKeyProvider, loginKey, storedKey, type UsageStats } from "./usage.ts";
+import type { Cooldown } from "./routing.ts";
 import type { CredentialFile } from "./vault.ts";
 import { serviceAccountOf, signingKey, validLocation, vertexFileData, vertexFileName } from "./vertex-auth.ts";
 
@@ -66,13 +67,41 @@ async function configRoute(request: Request, path: string[], yaml: boolean, acco
   return json({ status: "ok", "config-version": 8 }, 200, { etag: await configTag(next.text) });
 }
 
+// The status messages CPA gives a credential while it cools down.
+const COOLDOWN_MESSAGES: Record<string, string> = {
+  unauthorized: "unauthorized",
+  payment_required: "payment_required",
+  not_found: "not_found",
+  quota: "quota exhausted",
+  transient_error: "transient upstream error",
+};
+
 function iso(seconds: number): string {
   return new Date(seconds * 1000).toISOString();
 }
 
-function credentialEntry(file: CredentialFile, nowSeconds: number, usage: UsageStats): Record<string, unknown> {
+// CPA's cooldown view: the active ones, the credential-wide one first, then models by name.
+function cooldownViews(cooldowns: readonly Cooldown[], nowSeconds: number): Record<string, unknown>[] {
+  return cooldowns
+    .filter((cooldown) => cooldown.until > nowSeconds)
+    .sort((a, b) => (a.model === "" ? -1 : b.model === "" ? 1 : a.model.localeCompare(b.model)))
+    .map((cooldown) => {
+      const view: Record<string, unknown> = { scope: cooldown.model === "" ? "credential" : "model" };
+      if (cooldown.model !== "") view.model_key = cooldown.model;
+      view.reason = cooldown.reason;
+      view.retry_at = iso(cooldown.until);
+      view.remaining_seconds = cooldown.until - nowSeconds;
+      if (cooldown.reason === "quota") view.backoff_level = cooldown.level;
+      if (cooldown.status >= 400 && cooldown.status <= 599) view.http_status = cooldown.status;
+      return view;
+    });
+}
+
+function credentialEntry(file: CredentialFile, nowSeconds: number, usage: UsageStats, cooldowns: readonly Cooldown[] = []): Record<string, unknown> {
   const expires = typeof file.data.expired === "string" ? Date.parse(file.data.expired) / 1000 : Number.NaN;
   const expired = Number.isFinite(expires) && expires <= nowSeconds && file.statusMessage === "token expired";
+  const views = cooldownViews(cooldowns, nowSeconds);
+  const cooling = views[0]?.scope === "credential" ? cooldowns.find((cooldown) => cooldown.model === "" && cooldown.until > nowSeconds) : undefined;
   const entry: Record<string, unknown> = {
     id: file.name,
     auth_index: file.name,
@@ -80,10 +109,10 @@ function credentialEntry(file: CredentialFile, nowSeconds: number, usage: UsageS
     type: file.provider,
     provider: file.provider,
     label: typeof file.data.email === "string" ? file.data.email : file.name,
-    status: file.disabled ? "disabled" : expired ? "error" : "active",
-    status_message: file.statusMessage,
+    status: file.disabled ? "disabled" : expired || cooling !== undefined ? "error" : "active",
+    status_message: file.statusMessage || (cooling === undefined ? "" : Object.hasOwn(COOLDOWN_MESSAGES, cooling.reason) ? COOLDOWN_MESSAGES[cooling.reason] : "request failed"),
     disabled: file.disabled,
-    unavailable: expired,
+    unavailable: expired || cooling !== undefined,
     runtime_only: false,
     source: "file",
     path: file.name,
@@ -92,11 +121,12 @@ function credentialEntry(file: CredentialFile, nowSeconds: number, usage: UsageS
     failed: usage.failed,
     recent_requests: usage.recent_requests,
     quota: null,
-    cooldowns: null,
+    cooldowns: views,
     created_at: iso(file.createdAt),
     modtime: iso(file.updatedAt),
     updated_at: iso(file.updatedAt),
   };
+  if (cooling !== undefined) entry.next_retry_after = iso(cooling.until);
   for (const field of ["email", "project_id", "note", "priority", "prefix", "proxy_url", "last_refresh"]) {
     if (file.data[field] !== undefined && file.data[field] !== "") entry[field] = file.data[field];
   }
@@ -107,7 +137,8 @@ function listCredentials(url: URL, account: Account): Response {
   const name = url.searchParams.get("name")?.trim() ?? "";
   const files = account.vault.credentialFiles().filter((file) => name === "" || file.name === name);
   const now = account.nowSeconds();
-  const entries = files.map((file) => credentialEntry(file, now, account.vault.usage.stats(loginKey(file.name), now)));
+  const cooldowns = account.vault.cooldowns(now);
+  const entries = files.map((file) => credentialEntry(file, now, account.vault.usage.stats(loginKey(file.name), now), cooldowns.filter((cooldown) => cooldown.id === loginKey(file.name))));
   const observedAt = new Date().toISOString();
   if (!url.searchParams.has("page") && !url.searchParams.has("page_size")) return json({ observed_at: observedAt, files: entries });
   const page = Math.max(1, Number(url.searchParams.get("page") ?? "1") || 1);
@@ -248,6 +279,18 @@ async function patchCredential(request: Request, account: Account, fields: boole
   const data = Object.fromEntries([...Object.entries(file.data), ...updates].filter(([key]) => !cleared.has(key)));
   account.vault.saveCredentialFile(name, file.provider, data, account.nowSeconds());
   return json({ status: "ok" });
+}
+
+// CPA's reset of one credential's cooldowns, by its auth index (here the login's file name).
+async function resetCooldowns(request: Request, account: Account): Promise<Response> {
+  const body = await readJson(request);
+  if (!body.ok || typeof body.value !== "object" || body.value === null) return failure(400, "invalid request body");
+  const index = (body.value as { auth_index?: unknown }).auth_index;
+  const name = typeof index === "string" ? index.trim() : "";
+  if (name === "") return failure(400, "auth_index is required");
+  if (account.vault.credentialFile(name) === null) return failure(404, "auth not found");
+  const models = account.vault.clearCooldowns(loginKey(name)).filter((model) => model !== "");
+  return json({ status: "ok", auth_index: name, models });
 }
 
 // CPA's catalog, refreshed first when a refresh is due.
@@ -435,7 +478,7 @@ export async function handleManagement(request: Request, account: Account): Prom
       case "GET server/latest-version":
         return json({ "latest-version": GATEWAY_VERSION });
       case "POST routing/cooldown/reset":
-        return json({ status: "ok" });
+        return resetCooldowns(request, account);
       default:
         if (request.method === "GET" && head === "routing" && rest[0] === "model-definitions" && rest.length === 2) {
           const channel = (rest[1] as string).trim().toLowerCase();
