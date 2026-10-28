@@ -62,7 +62,7 @@ describe("ChatGPT (Codex) login", () => {
     const { account, bodies, vault } = setup([tokens("at-2")]);
     const near = codexFileData({ accessToken: "at-1", refreshToken: "rt-1", idToken: ID_TOKEN, accountId: "acct-123", email: "me@example.com", planType: "pro", expiresAt: NOW + 60 });
     vault.saveCredentialFile("codex-me.json", "codex", near, NOW);
-    expect(await account.codexToken()).toEqual({ ok: true, accessToken: "at-2", expiresAt: NOW + 3600, accountId: "acct-123" });
+    expect(await account.codexToken()).toEqual({ ok: true, accessToken: "at-2", expiresAt: NOW + 3600, accountId: "acct-123", name: "codex-me.json" });
     expect(Object.fromEntries(bodies[0] ?? [])).toEqual({ client_id: CLIENT_ID, grant_type: "refresh_token", refresh_token: "rt-1", scope: "openid profile email" });
     expect(vault.credentialFile("codex-me.json")?.data).toMatchObject({ access_token: "at-2", refresh_token: "rt-1" });
     // A Claude-only gateway still says to connect a ChatGPT account.

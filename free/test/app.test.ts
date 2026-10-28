@@ -4,6 +4,7 @@ import { EdgeCache, handle, type AppConfig } from "../src/app.ts";
 import { upstreamCredentials, type RoutingTable } from "../src/providers.ts";
 import { OAUTH_BETA } from "../src/proxy.ts";
 import { SESSION_COOKIE, issueSession } from "../src/session.ts";
+import type { UsageRecord } from "../src/usage.ts";
 
 const PASSWORD = "correct-horse-battery-staple-0123456789";
 const NOW = 1_800_000_000;
@@ -47,12 +48,17 @@ class FakeBackend implements Backend {
     this.managed.push(request);
     return this.answer.clone();
   }
+  recorded: UsageRecord[] = [];
+  async record(records: UsageRecord[]) {
+    this.recorded.push(...records);
+  }
 }
 
 async function setup(upstream: (request: Request) => Promise<Response> = async () => new Response("{}")) {
   const backend = new FakeBackend();
   backend.hashes.add(await hashKey(KEY));
   const seen: Request[] = [];
+  const later: Promise<unknown>[] = [];
   const config: AppConfig = {
     backend,
     dashboardPassword: PASSWORD,
@@ -64,8 +70,14 @@ async function setup(upstream: (request: Request) => Promise<Response> = async (
     },
     panel: async () => new Response("<html>CPA panel</html>", { headers: { "content-type": "text/html" } }),
     cache: new EdgeCache(),
+    waitUntil: (promise) => later.push(promise),
+    usageFlushMs: 0,
   };
-  return { backend, seen, config };
+  // Waits for the work the gateway left running after its responses.
+  const settle = async () => {
+    while (later.length > 0) await later.shift();
+  };
+  return { backend, seen, config, settle };
 }
 
 function at(path: string, init: RequestInit = {}): Request {
@@ -405,9 +417,39 @@ describe("management API", () => {
 
   it("forgets the cached token after a credential change", async () => {
     const { config } = await setup();
-    config.cache.token = { value: "old", expiresAt: NOW + 3600, cachedUntil: NOW + 60 };
+    config.cache.token = { value: "old", name: "claude-a.json", expiresAt: NOW + 3600, cachedUntil: NOW + 60 };
     await handle(await managementCall("/v8/management/credentials?name=claude-a.json", { authorization: `Bearer ${MANAGEMENT_KEY}` }, { method: "DELETE" }), config);
     expect(config.cache.token).toBeNull();
+  });
+});
+
+describe("usage records", () => {
+  it("logs each API request and counts the login or key that served it, without the query", async () => {
+    const { config, backend, settle } = await setup(async () => new Response("{}", { status: 200 }));
+    backend.tokenResult = { ok: true, accessToken: "access-1", expiresAt: NOW + 3600, name: "claude-me.json" };
+    await handle(messages({ "x-api-key": KEY, "cf-connecting-ip": "1.2.3.4" }), config);
+    await handle(at(`/v1beta/models/gemini-2.5-flash:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    await handle(messages({ "x-api-key": "wrong" }), config);
+    await settle();
+    expect(backend.recorded.map((record) => record.attempts)).toEqual([[{ key: "file:claude-me.json", ok: true }], [], []]);
+    const [served, gemini, refused] = backend.recorded.map((record) => record.line);
+    expect(served).toMatch(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[[0-9a-f]{8}\] \[info \] 200 \| +\d+ms \| +1\.2\.3\.4 \| POST +"\/v1\/messages" provider=claude$/);
+    expect(gemini).toContain('"/v1beta/models/gemini-2.5-flash:generateContent"');
+    expect(gemini).not.toContain(KEY);
+    expect(refused).toContain("[warn ] 401");
+  });
+
+  it("counts every attempt on API keys, including ones retried elsewhere", async () => {
+    let calls = 0;
+    const { config, backend, settle } = await providersSetup(async () => (calls++ === 0 ? new Response("busy", { status: 429 }) : Response.json({})));
+    backend.table = { ...backend.table, claudeOAuth: false };
+    await handle(post("/v1/chat/completions", { model: "kimi", messages: [] }), config);
+    await settle();
+    expect(backend.recorded[0]?.attempts).toEqual([
+      { key: expect.stringMatching(/^router\nhttps:\/\/router\.example\/api\/v1\|sk-router-[12]$/), ok: false },
+      { key: expect.stringMatching(/^router\nhttps:\/\/router\.example\/api\/v1\|sk-router-[12]$/), ok: true },
+    ]);
+    expect(backend.recorded[0]?.line).toContain('provider=openai-compatibility model="kimi"');
   });
 });
 
@@ -415,7 +457,7 @@ describe("OAuth callback", () => {
   it("needs sign-in, then hands the code to the store", async () => {
     const { config, backend } = await setup();
     expect((await handle(at("/callback?code=c&state=s"), config)).status).toBe(401);
-    config.cache.token = { value: "old", expiresAt: NOW + 3600, cachedUntil: NOW + 60 };
+    config.cache.token = { value: "old", name: "claude-a.json", expiresAt: NOW + 3600, cachedUntil: NOW + 60 };
     const done = await handle(at("/callback?code=c&state=s", { headers: { cookie: await cookie() } }), config);
     expect(await done.text()).toContain("Login received");
     expect(backend.managed[0]?.url).toBe(`${ORIGIN}/v8/management/oauth/callback?code=c&state=s`);

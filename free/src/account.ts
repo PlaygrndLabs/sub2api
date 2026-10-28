@@ -2,9 +2,11 @@ import { OAuthError, authorizeUrl, exchangeCode, parseCallback, randomToken, ref
 import * as codex from "./codex-oauth.ts";
 import { Config } from "./config.ts";
 import { upstreamCredentials, type RoutingTable, type UpstreamCredential } from "./providers.ts";
+import { storedKey, type UsageRecord } from "./usage.ts";
 import { claudeCredential, claudeFileData, type CredentialFile, type LoginSession, type Vault } from "./vault.ts";
 
-export type TokenResult = { ok: true; accessToken: string; expiresAt: number; accountId?: string } | { ok: false; status: number; message: string };
+// `name` is the login file the token belongs to, for its usage counts.
+export type TokenResult = { ok: true; accessToken: string; expiresAt: number; accountId?: string; name?: string } | { ok: false; status: number; message: string };
 
 // The subscription logins the gateway signs in to and keeps fresh.
 export type LoginProvider = "claude" | "codex";
@@ -21,6 +23,7 @@ export interface Backend {
   attemptAllowed(client: string): Promise<boolean>;
   manage(request: Request): Promise<Response>;
   routing(): Promise<RoutingTable>;
+  record(records: UsageRecord[]): Promise<void>;
 }
 
 export const REFRESH_MARGIN_SECONDS = 5 * 60;
@@ -113,7 +116,7 @@ export class Account {
   async tokenFor(file: CredentialFile, force = false): Promise<TokenResult> {
     const current = loginOf(file);
     if (current === null) return { ok: false, status: 503, message: `The login ${file.name} has no tokens: sign in again.` };
-    if (!force && current.expiresAt - this.nowSeconds() > REFRESH_MARGIN_SECONDS) return granted(current);
+    if (!force && current.expiresAt - this.nowSeconds() > REFRESH_MARGIN_SECONDS) return granted(current, file.name);
     let pending = this.refreshing.get(file.name);
     if (pending === undefined) {
       pending = this.refresh(file, current).finally(() => this.refreshing.delete(file.name));
@@ -132,6 +135,20 @@ export class Account {
       this.lastForcedRefresh.set(file.name, now);
       this.vault.saveCredentialFile(file.name, file.provider, { ...file.data, expired: new Date(0).toISOString() }, now);
       return;
+    }
+  }
+
+  // Counts every attempt; keeps log lines only while the dashboard's "logging to file" is on.
+  async record(records: UsageRecord[]): Promise<void> {
+    const stored = await Promise.all(records.map(async (record) => ({ ...record, attempts: await Promise.all(record.attempts.map(async (attempt) => ({ ...attempt, key: await storedKey(attempt.key) }))) })));
+    this.vault.usage.record(stored, this.loggingEnabled(), this.nowSeconds());
+  }
+
+  loggingEnabled(): boolean {
+    try {
+      return this.currentConfig().read(["observability", "logs", "logging-to-file"]) === true;
+    } catch {
+      return false;
     }
   }
 
@@ -201,21 +218,21 @@ export class Account {
         next = { ...refreshed, accountId: "" };
       }
       this.vault.setCredentialStatus(file.name, false, "", this.nowSeconds());
-      return granted(next);
+      return granted(next, file.name);
     } catch (error) {
       if (error instanceof OAuthError && (error.status === 400 || error.status === 401)) {
         this.vault.setCredentialStatus(file.name, false, "token expired", this.nowSeconds());
         return { ok: false, status: 503, message: `The ${label} login has expired: sign in again under OAuth login in the dashboard.` };
       }
       // A token that hasn't actually expired yet is still worth using.
-      if (current.expiresAt > this.nowSeconds()) return granted(current);
+      if (current.expiresAt > this.nowSeconds()) return granted(current, file.name);
       const reason = error instanceof OAuthError ? error.message : "the provider couldn't be reached";
       return { ok: false, status: 503, message: `Couldn't refresh the ${label} login. ${reason}` };
     }
   }
 }
 
-function granted(login: Login): TokenResult {
-  const result = { ok: true as const, accessToken: login.accessToken, expiresAt: login.expiresAt };
+function granted(login: Login, name: string): TokenResult {
+  const result = { ok: true as const, accessToken: login.accessToken, expiresAt: login.expiresAt, name };
   return login.accountId === "" ? result : { ...result, accountId: login.accountId };
 }

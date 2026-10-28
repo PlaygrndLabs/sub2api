@@ -7,7 +7,7 @@ const cache = new EdgeCache();
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
 export default {
-  fetch(request, env) {
+  fetch(request, env, ctx) {
     return handle(request, {
       backend: env.STORE.getByName("main"),
       dashboardPassword: env.DASHBOARD_PASSWORD ?? "",
@@ -16,6 +16,7 @@ export default {
       upstream: (upstream) => fetch(upstream),
       panel: (panelRequest) => env.ASSETS.fetch(new Request(new URL("/management.html", panelRequest.url))),
       cache,
+      waitUntil: (promise) => ctx.waitUntil(promise),
     });
   },
 } satisfies ExportedHandler<Env>;

@@ -8,6 +8,7 @@ import { MANAGEMENT_PREFIX } from "./management.ts";
 import { loginPage, messagePage } from "./pages.ts";
 import { candidates, inDefaultFamily, listedModels, NATIVE_FORMAT, ordered, type Candidate, type Format, type RoutingTable } from "./providers.ts";
 import { CODEX_UPSTREAM, codexRequest, downstreamResponse, formatError, presentedKey, providerRequest, routeOf, upstreamRequest, UPSTREAM, type Route } from "./proxy.ts";
+import { apiKeyKey, loginKey, requestLine, type Attempt, type UsageRecord } from "./usage.ts";
 import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "./session.ts";
 
 export const MIN_PASSWORD_LENGTH = 16;
@@ -20,15 +21,20 @@ const MAX_FORM_BODY = 4096;
 // Workers accept request bodies up to 100 MB; a larger declared body is refused before reading.
 const MAX_BODY = 32 * 1024 * 1024;
 const PASSWORD_NOT_SET = `Sign-in is off: set the DASHBOARD_PASSWORD secret to at least ${MIN_PASSWORD_LENGTH} characters.`;
+// Usage records wait this long in the isolate, so a burst of requests costs one Durable Object call.
+const USAGE_FLUSH_MS = 5000;
+const USAGE_FLUSH_COUNT = 50;
 const OAUTH_CALLBACK_PATHS = new Set(["/callback", "/auth/callback", "/oauth-callback", "/anthropic/callback", "/codex/callback"]);
 
 // Per-isolate memory, so most API calls skip the Durable Object round trip entirely.
 export class EdgeCache {
   readonly keys = new Map<string, number>();
-  token: { value: string; expiresAt: number; cachedUntil: number } | null = null;
-  codexToken: { value: string; accountId: string; expiresAt: number; cachedUntil: number } | null = null;
+  token: { value: string; name: string; expiresAt: number; cachedUntil: number } | null = null;
+  codexToken: { value: string; name: string; accountId: string; expiresAt: number; cachedUntil: number } | null = null;
   routing: { table: RoutingTable; until: number } | null = null;
   turn = 0;
+  usage: UsageRecord[] = [];
+  flushing = false;
 
   // A config or login change reaches this isolate at once and others within a minute.
   forgetConfig(): void {
@@ -47,6 +53,9 @@ export interface AppConfig {
   readonly upstream: Fetcher;
   readonly panel: (request: Request) => Promise<Response>;
   readonly cache: EdgeCache;
+  // Keeps the isolate alive for work after the response, such as sending usage records.
+  readonly waitUntil?: (promise: Promise<unknown>) => void;
+  readonly usageFlushMs?: number;
 }
 
 function apiError(status: number, type: string, message: string): Response {
@@ -99,7 +108,7 @@ async function accessToken(config: AppConfig): Promise<{ token: string } | Respo
   if (cached !== null && cached.cachedUntil > now && cached.expiresAt - now > REFRESH_MARGIN_SECONDS) return { token: cached.value };
   const result = await config.backend.token();
   if (!result.ok) return apiError(result.status, "api_error", result.message);
-  config.cache.token = { value: result.accessToken, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS };
+  config.cache.token = { value: result.accessToken, name: result.name ?? "", expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS };
   return { token: result.accessToken };
 }
 
@@ -123,7 +132,7 @@ async function codexAccess(config: AppConfig): Promise<{ token: string; accountI
   const result = await config.backend.codexToken();
   if (!result.ok) return formatError("openai-response", result.status, "api_error", result.message);
   const accountId = result.accountId ?? "";
-  config.cache.codexToken = { value: result.accessToken, accountId, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS };
+  config.cache.codexToken = { value: result.accessToken, name: result.name ?? "", accountId, expiresAt: result.expiresAt, cachedUntil: now + TOKEN_CACHE_SECONDS };
   return { token: result.accessToken, accountId };
 }
 
@@ -331,11 +340,28 @@ function requestBody(text: string): RequestBody {
   return { text, model, withModel: (next) => JSON.stringify({ ...parsed, model: next }) };
 }
 
-async function proxied(request: Request, url: URL, route: Route & { format: Format }, config: AppConfig): Promise<Response> {
+// What a request was served with, for its log line and the credentials' usage counts.
+interface Trace {
+  readonly attempts: Attempt[];
+  provider: string;
+  model: string;
+}
+
+function noteAttempt(trace: Trace, config: AppConfig, candidate: Candidate, status: number): void {
+  trace.provider = candidate.credential.kind;
+  let key: string | null = apiKeyKey(candidate.credential);
+  if (candidate.credential.id === CLAUDE_LOGIN_ID) key = config.cache.token?.name ? loginKey(config.cache.token.name) : null;
+  else if (candidate.credential.id === CODEX_LOGIN_ID) key = config.cache.codexToken?.name ? loginKey(config.cache.codexToken.name) : null;
+  if (key !== null) trace.attempts.push({ key, ok: status < 400 });
+}
+
+async function proxied(request: Request, url: URL, route: Route & { format: Format }, config: AppConfig, trace: Trace): Promise<Response> {
   const table = await routingTable(config);
   // Claude clients with only Claude logins configured: stream the body through unread.
   if (route.format === "claude" && !table.codexOAuth && !table.credentials.some((credential) => servable("claude", credential.kind))) {
-    return viaClaudeLogin(request, url, config);
+    const response = await viaClaudeLogin(request, url, config);
+    noteAttempt(trace, config, loginCandidate("claude", ""), response.status);
+    return response;
   }
   const length = Number(request.headers.get("content-length") ?? "0");
   if (Number.isFinite(length) && length > MAX_BODY) return formatError(route.format, 413, "invalid_request_error", "Request body too large.");
@@ -343,6 +369,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   const parsed = route.format === "gemini" ? null : requestBody(text);
   const model = route.geminiModel ?? parsed?.model ?? null;
   if (model === null) return formatError(route.format, 400, "invalid_request_error", "The request needs a model.");
+  trace.model = model;
   const found = candidates(table, model);
   const usable = found.filter((candidate) => servable(route.format, candidate.credential.kind));
   if (route.format === "claude" && table.claudeOAuth && /^claude-/i.test(model)) usable.push(loginCandidate("claude", model));
@@ -351,7 +378,11 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   // Claude Code asking for a ChatGPT model by name, e.g. ANTHROPIC_MODEL=gpt-5.6-sol.
   if (route.format === "claude" && table.codexOAuth && inDefaultFamily("codex", model)) usable.push(loginCandidate("codex", model));
   if (usable.length === 0) {
-    if (route.format === "claude" && table.claudeOAuth) return viaClaudeLogin(request, url, config, text);
+    if (route.format === "claude" && table.claudeOAuth) {
+      const response = await viaClaudeLogin(request, url, config, text);
+      noteAttempt(trace, config, loginCandidate("claude", model), response.status);
+      return response;
+    }
     // Without CPA's cloaking a Claude login serves Claude Code only, so it isn't offered here.
     const reason =
       route.format === "openai" && table.claudeOAuth && /^claude-/i.test(model)
@@ -374,12 +405,14 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
       else if (translated) response = await viaTranslation(request, url, route, config, candidate, text);
       else if (candidate.credential.id === CLAUDE_LOGIN_ID) response = await viaClaudeLogin(request, url, config, body);
       else response = await viaCodexLogin(request, url, config, body);
+      noteAttempt(trace, config, candidate, response.status);
       if (isLast || !RETRY_STATUSES.has(response.status)) return response;
       await response.body?.cancel();
       last = new Response(null, { status: response.status });
       continue;
     }
     const upstream = await config.upstream(providerRequest(request, url, route, candidate.credential, candidate.model, body)).catch(() => null);
+    noteAttempt(trace, config, candidate, upstream?.status ?? 502);
     if (upstream !== null && (isLast || !RETRY_STATUSES.has(upstream.status))) return downstreamResponse(upstream);
     if (upstream !== null) {
       await upstream.body?.cancel();
@@ -411,14 +444,63 @@ async function modelList(request: Request, url: URL, config: AppConfig): Promise
   return Response.json({ ...body, data: [...(body.data ?? []), ...extra] }, { headers });
 }
 
+// Sends the isolate's usage records to the Durable Object, a few seconds after the first one so
+// that requests close together share one call.
+function remember(config: AppConfig, record: UsageRecord): void {
+  const cache = config.cache;
+  if (config.waitUntil === undefined) return;
+  cache.usage.push(record);
+  const flush = async () => {
+    const batch = cache.usage.splice(0);
+    if (batch.length > 0) await config.backend.record(batch).catch(() => undefined);
+  };
+  if (cache.usage.length >= USAGE_FLUSH_COUNT) {
+    config.waitUntil(flush());
+    return;
+  }
+  if (cache.flushing) return;
+  cache.flushing = true;
+  config.waitUntil(
+    new Promise((resolve) => setTimeout(resolve, config.usageFlushMs ?? USAGE_FLUSH_MS))
+      .then(flush)
+      .finally(() => {
+        cache.flushing = false;
+      }),
+  );
+}
+
+function requestId(): string {
+  return crypto.randomUUID().replaceAll("-", "").slice(0, 8);
+}
+
 async function api(request: Request, url: URL, route: Route, config: AppConfig): Promise<Response> {
+  const started = Date.now();
+  const trace: Trace = { attempts: [], provider: "", model: route.geminiModel ?? "" };
+  const response = await served(request, url, route, config, trace);
+  const line = requestLine({
+    at: started,
+    requestId: requestId(),
+    status: response.status,
+    ms: Date.now() - started,
+    ip: request.headers.get("cf-connecting-ip") ?? "",
+    method: request.method,
+    // The query is left out: Gemini clients may put their key in it.
+    path: url.pathname,
+    provider: trace.provider,
+    model: trace.model,
+  });
+  remember(config, { at: started, line, attempts: trace.attempts });
+  return response;
+}
+
+async function served(request: Request, url: URL, route: Route, config: AppConfig, trace: Trace): Promise<Response> {
   if (request.method !== route.method) return formatError(route.format, 405, "invalid_request_error", "Method not allowed.");
   const key = presentedKey(request, url);
   if (key === null || !(await keyValid(key, config))) {
     return formatError(route.format, 401, "authentication_error", "Invalid API key. Add one under API Keys in the gateway dashboard.");
   }
   if (route.format === "models") return modelList(request, url, config);
-  return proxied(request, url, route as Route & { format: Format }, config);
+  return proxied(request, url, route as Route & { format: Format }, config, trace);
 }
 
 async function signedIn(request: Request, config: AppConfig): Promise<boolean> {

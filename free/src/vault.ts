@@ -1,5 +1,6 @@
 import type { Credential } from "./claude-oauth.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
+import { UsageStore } from "./usage.ts";
 
 // The slice of Durable Object SQLite storage this file uses, so tests can back it with node:sqlite.
 export interface Sql {
@@ -40,6 +41,8 @@ const ATTEMPT_WINDOW = 60;
 const ATTEMPT_LIMIT = 5;
 
 export class Vault {
+  readonly usage: UsageStore;
+
   constructor(private readonly sql: Sql) {
     sql.exec(`CREATE TABLE IF NOT EXISTS api_keys (
       id INTEGER PRIMARY KEY, name TEXT NOT NULL, hash TEXT NOT NULL UNIQUE, hint TEXT NOT NULL, created_at INTEGER NOT NULL)`);
@@ -55,6 +58,7 @@ export class Vault {
     sql.exec(`CREATE TABLE IF NOT EXISTS oauth_sessions (
       state TEXT PRIMARY KEY, provider TEXT NOT NULL, verifier TEXT NOT NULL, created_at INTEGER NOT NULL,
       status TEXT NOT NULL DEFAULT 'wait', error TEXT NOT NULL DEFAULT '')`);
+    this.usage = new UsageStore(sql);
     this.migrateSingleLogin();
   }
 
