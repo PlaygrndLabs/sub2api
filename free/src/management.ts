@@ -13,7 +13,7 @@ import { serviceAccountOf, signingKey, validLocation, vertexFileData, vertexFile
 export const MANAGEMENT_PREFIX = "/v8/management";
 export const GATEWAY_VERSION = "sub2api-free";
 // CPA's provider names and their aliases.
-const OAUTH_ALIASES: Record<string, OAuthProvider> = { claude: "claude", anthropic: "claude", codex: "codex", openai: "codex" };
+const OAUTH_ALIASES: Record<string, OAuthProvider> = { claude: "claude", anthropic: "claude", codex: "codex", openai: "codex", kimi: "kimi", "kimi-ai": "kimi" };
 
 function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } });
@@ -313,8 +313,15 @@ async function oauthRoute(request: Request, url: URL, action: string, account: A
       if (provider === "") return failure(400, "provider is required");
       const login = Object.hasOwn(OAUTH_ALIASES, provider) ? OAUTH_ALIASES[provider] : undefined;
       if (login === undefined) return failure(404, "provider_not_found");
-      const { url: authUrl, state } = await account.startLogin(login);
-      return json({ status: "ok", url: authUrl, state });
+      if (login !== "kimi") {
+        const { url: authUrl, state } = await account.startLogin(login);
+        return json({ status: "ok", url: authUrl, state });
+      }
+      // Kimi's device flow, answered as CPA answers it.
+      const domain = provider === "kimi-ai" ? "kimi.ai" : url.searchParams.get("domain") || url.searchParams.get("channel") || "";
+      const started = await account.startLogin(login, domain).catch(() => null);
+      if (started === null) return failure(500, "failed to generate authorization url");
+      return json({ status: "ok", url: started.url, state: started.state, flow: "device", ...(started.userCode === undefined ? {} : { user_code: started.userCode }), ...(started.expiresIn === undefined ? {} : { expires_in: started.expiresIn }) });
     }
     case "POST import": {
       const provider = url.searchParams.get("provider")?.trim().toLowerCase() ?? "";
@@ -325,8 +332,9 @@ async function oauthRoute(request: Request, url: URL, action: string, account: A
     case "GET status": {
       const state = url.searchParams.get("state")?.trim() ?? "";
       if (state === "") return json({ status: "ok" });
-      const session = account.session(state);
-      if (session === null) return json({ status: "error", error: "unknown or expired state" });
+      const found = account.session(state);
+      if (found === null) return json({ status: "error", error: "unknown or expired state" });
+      const session = await account.pollDevice(found);
       if (session.status === "ok") return json({ status: "ok" });
       if (session.status === "error") return json({ status: "error", error: session.error });
       return json({ status: "wait" });

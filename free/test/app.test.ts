@@ -34,8 +34,10 @@ class FakeBackend implements Backend {
     return this.codexResult;
   }
   vertexResult: TokenResult = { ok: true, accessToken: "ya29.vertex", expiresAt: NOW + 3600, endpoint: "https://us-central1-aiplatform.googleapis.com/v1/projects/p-1/locations/us-central1/publishers/google/models", name: "vertex-p-1.json" };
+  kimiResult: TokenResult = { ok: true, accessToken: "kimi-at", expiresAt: NOW + 3600, endpoint: "https://api.kimi.com/coding", headers: { "user-agent": "sub2api", "x-msh-platform": "sub2api", "x-msh-device-id": "dev-1" }, name: "kimi-1.json" };
   async loginToken(provider: string) {
     this.calls.push(`loginToken:${provider}`);
+    if (provider === "kimi") return this.kimiResult;
     return this.vertexResult;
   }
   async invalidate(accessToken: string) {
@@ -464,6 +466,42 @@ describe("Vertex", () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ error: { message: "Google refused the Vertex service account" } });
     expect(seen).toHaveLength(0);
+  });
+});
+
+describe("Kimi logins", () => {
+  it("serves Claude Code and both OpenAI formats untranslated, with Kimi's model names", async () => {
+    const { config, backend, seen } = await setup();
+    backend.table = { credentials: [], claudeOAuth: true, codexOAuth: false, kimiOAuth: true };
+    await handle(post("/v1/messages", { model: "kimi-k2.8", max_tokens: 10, messages: [] }, { "anthropic-version": "2023-06-01", "anthropic-beta": "interleaved-thinking-2025-05-14", "user-agent": "claude-cli/2.1" }), config);
+    await handle(post("/v1/chat/completions", { model: "kimi-k3", messages: [] }), config);
+    await handle(post("/v1/responses", { model: "kimi-k3", input: "hi" }), config);
+    expect(seen.map((request) => request.url)).toEqual(["https://api.kimi.com/coding/v1/messages", "https://api.kimi.com/coding/v1/chat/completions", "https://api.kimi.com/coding/v1/responses"]);
+    expect(seen.map((request) => request.headers.get("authorization"))).toEqual(["Bearer kimi-at", "Bearer kimi-at", "Bearer kimi-at"]);
+    expect(seen[0]?.headers.get("user-agent")).toBe("sub2api");
+    expect(seen[0]?.headers.get("x-msh-device-id")).toBe("dev-1");
+    expect(seen[0]?.headers.get("anthropic-beta")).toBe("interleaved-thinking-2025-05-14");
+    expect(seen[0]?.headers.get("x-api-key")).toBeNull();
+    expect(await seen[0]?.json()).toMatchObject({ model: "kimi-for-coding" });
+    expect(await seen[1]?.json()).toMatchObject({ model: "k3" });
+    // Claude models still go to the Claude login.
+    await handle(post("/v1/messages", { model: "claude-sonnet-5-5", messages: [] }), config);
+    expect(seen[3]?.url).toBe("https://api.anthropic.com/v1/messages");
+    expect(backend.calls.filter((call) => call === "loginToken:kimi")).toHaveLength(1);
+  });
+
+  it("lists Kimi's models from CPA's catalog", async () => {
+    const { config, backend } = await setup();
+    backend.table = { credentials: [], claudeOAuth: false, codexOAuth: false, kimiOAuth: true };
+    const listed = (await (await handle(at("/v1/models", { headers: { authorization: `Bearer ${KEY}` } }), config)).json()) as { data: { id: string }[] };
+    expect(listed.data.map((model) => model.id)).toContain("kimi-k2");
+  });
+
+  it("asks for a new token when Kimi refuses one", async () => {
+    const { config, backend } = await setup(async () => new Response("no", { status: 401 }));
+    backend.table = { credentials: [], claudeOAuth: false, codexOAuth: false, kimiOAuth: true };
+    expect((await handle(post("/v1/chat/completions", { model: "kimi-k3", messages: [] }), config)).status).toBe(401);
+    expect(backend.invalidated).toEqual(["kimi-at"]);
   });
 });
 

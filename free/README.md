@@ -2,10 +2,11 @@
 
 A container-free version of sub2api that runs on Cloudflare's **free** Workers plan. It is a TypeScript rewrite of CPA (CLIProxyAPI), not CPA itself, and serves **CPA's own dashboard** (Cli-Proxy-API-Management-Center) through a port of CPA's v8 management API. So both installs look and work the same in the browser.
 
-It covers **Claude and ChatGPT (Codex) subscriptions** and **API keys** for Claude, Gemini, Vertex AI, Codex, xAI and any OpenAI-compatible provider, plus **Vertex AI service accounts**. More OAuth providers and format translation come in later phases.
+It covers **Claude, ChatGPT (Codex) and Kimi subscriptions** and **API keys** for Claude, Gemini, Vertex AI, Codex, xAI and any OpenAI-compatible provider, plus **Vertex AI service accounts**. More OAuth providers and format translation come in later phases.
 
 - CPA's dashboard, downloaded at build time from the latest panel release (pin one with `PANEL_VERSION`, and its checksum with `PANEL_SHA256`).
 - Claude and ChatGPT (Codex) OAuth logins from the dashboard's **OAuth Login** page (the same PKCE flows as CPA, Claude Code and the Codex CLI), with tokens refreshed automatically.
+- Kimi logins (kimi.com or kimi.ai) through Kimi's device sign-in, as in CPA. Claude Code and both OpenAI formats reach Kimi untranslated: ask for a Kimi model such as `kimi-k3` or `kimi-k2.8`. Requests name this gateway, as CPA's name CLIProxyAPI.
 - Several logins per provider, used in turn. Upload, download, disable, edit and delete them under **Auth Files**, in CPA's auth-file format, so files move between the two installs.
 - CPA's YAML config, edited in the **Config Panel**. Client API keys live in `access.api-keys`, as in CPA.
 - `POST /v1/messages` and `POST /v1/messages/count_tokens`, streamed straight through to Anthropic.

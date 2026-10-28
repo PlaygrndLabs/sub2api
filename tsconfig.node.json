@@ -12,7 +12,8 @@
     "free/test/management.test.ts",
     "free/test/codex.test.ts",
     "free/test/usage.test.ts",
-    "free/test/vertex.test.ts"
+    "free/test/vertex.test.ts",
+    "free/test/kimi.test.ts"
   ],
   "exclude": []
 }
