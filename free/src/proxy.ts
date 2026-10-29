@@ -19,6 +19,7 @@ const ROUTES = new Map<string, { method: string; format: Format | "models" }>([
   ["/v1/responses", { method: "POST", format: "openai-response" }],
   ["/backend-api/codex/responses", { method: "POST", format: "openai-response" }],
   ["/v1beta/models", { method: "GET", format: "models" }],
+  ["/v1beta/interactions", { method: "POST", format: "interactions" }],
 ]);
 const GEMINI_ACTION = /^\/v1beta\/models\/([^/:]+):(generateContent|streamGenerateContent|countTokens)$/;
 const GEMINI_MODEL = /^\/v1beta\/models\/([^/:]+)$/;
@@ -139,6 +140,10 @@ export function providerRequest(request: Request, url: URL, route: Route, creden
     case "gemini":
       headers.set("x-goog-api-key", credential.apiKey);
       target = `${credential.baseUrl}/v1beta/models/${encodeURIComponent(model)}:${route.geminiAction ?? "generateContent"}${forwardedSearch(url)}`;
+      break;
+    case "interactions":
+      headers.set("x-goog-api-key", credential.apiKey);
+      target = `${credential.baseUrl}/v1beta/interactions${forwardedSearch(url)}`;
       break;
     case "vertex":
       // A service account login has no key: its token comes as a configured header instead.

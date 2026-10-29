@@ -198,6 +198,8 @@ export function definitionChannel(name: string): Channel | null {
 const OWNER: Record<ProviderKind, { owned_by: string; type: string; channel: Channel | null }> = {
   claude: { owned_by: "anthropic", type: "claude", channel: "claude" },
   gemini: { owned_by: "google", type: "gemini", channel: "gemini" },
+  // Interactions keys serve Interactions clients only, so only the models they name are listed.
+  interactions: { owned_by: "google", type: "gemini", channel: null },
   codex: { owned_by: "openai", type: "openai", channel: "codex-pro" },
   xai: { owned_by: "xai", type: "xai", channel: "xai" },
   vertex: { owned_by: "google", type: "gemini", channel: "vertex" },

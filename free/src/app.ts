@@ -485,6 +485,19 @@ function sleep(ms: number): Promise<void> {
 // Error bodies are read for a wait hint only while small.
 const HINT_BODY_LIMIT = 64 * 1024;
 
+function interactionsAgent(text: string): string | null {
+  const body = parsedObject(text);
+  return typeof body?.agent === "string" && body.agent.trim() !== "" ? body.agent.trim() : null;
+}
+
+// Every Interactions key, highest priority first, for a request naming an agent.
+function interactionsKeys(table: RoutingTable, agent: string): Candidate[] {
+  return table.credentials
+    .filter((credential) => credential.kind === "interactions")
+    .map((credential) => ({ credential, model: agent }))
+    .sort((a, b) => b.credential.priority - a.credential.priority);
+}
+
 async function proxied(request: Request, url: URL, route: Route & { format: Format }, config: AppConfig, trace: Trace): Promise<Response> {
   const table = await routingTable(config);
   const logins = loginsOf(table);
@@ -501,13 +514,20 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   if (Number.isFinite(length) && length > MAX_BODY) return formatError(route.format, 413, "invalid_request_error", "Request body too large.");
   const text = await request.text();
   const parsed = route.format === "gemini" ? null : requestBody(text);
-  const model = route.geminiModel ?? parsed?.model ?? null;
+  let model = route.geminiModel ?? parsed?.model ?? null;
+  // An Interactions request names a model or an agent, as in CPA; an agent runs on any
+  // Interactions key, and "models/x" is sent as "x".
+  const agent = route.format === "interactions" && model === null ? interactionsAgent(text) : null;
+  if (route.format === "interactions" && model === null && agent === null) return formatError(route.format, 400, "invalid_request_error", "request requires exactly one of model or agent");
+  if (route.format === "interactions" && model?.startsWith("models/") === true && model.length > 7) model = model.slice(7);
+  model ??= agent;
   if (model === null) return formatError(route.format, 400, "invalid_request_error", "The request needs a model.");
   trace.model = model;
-  const found = candidates(table, model);
+  const found = agent !== null ? interactionsKeys(table, agent) : candidates(table, model);
   // Every client format reaches every provider: Claude requests are translated to the
-  // provider's format, and the others through Anthropic Messages.
-  const usable = [...found];
+  // provider's format, and the others through Anthropic Messages. Interactions keys and
+  // clients are the exception: they only meet each other, untranslated.
+  const usable = found.filter((candidate) => (candidate.credential.kind === "interactions") === (route.format === "interactions"));
   // "prefix/model" picks the logins with that prefix; other names may use any login.
   const { prefix, model: bare } = splitModel(table, model);
   const loginsFor = (provider: LoginEntry["provider"]) => (provider === "claude" ? claudeLogins : codexLogins).filter((login) => prefix === "" || login.prefix === prefix).map((login) => loginCandidate(login, bare));
@@ -517,10 +537,10 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   // Claude Code or a Chat client asking for a ChatGPT model by name, e.g. ANTHROPIC_MODEL=gpt-5.6-sol.
   if ((route.format === "claude" || route.format === "openai") && inDefaultFamily("codex", bare)) usable.push(...loginsFor("codex"));
   // Vertex service accounts take Gemini models, from any client, translated where needed.
-  if (table.vertexOAuth === true && inDefaultFamily("vertex", model)) usable.push(servedCandidate("vertex", model));
+  if (route.format !== "interactions" && table.vertexOAuth === true && inDefaultFamily("vertex", model)) usable.push(servedCandidate("vertex", model));
   // Kimi logins take Kimi's models in Anthropic and both OpenAI formats untranslated, and
   // Gemini clients through Anthropic Messages.
-  if (table.kimiOAuth === true && inDefaultFamily("kimi", model)) usable.push(servedCandidate("kimi", kimiUpstreamModel(model)));
+  if (route.format !== "interactions" && table.kimiOAuth === true && inDefaultFamily("kimi", model)) usable.push(servedCandidate("kimi", kimiUpstreamModel(model)));
   if (usable.length === 0) {
     if (route.format === "claude" && table.claudeOAuth) {
       const response = await viaClaudeLogin(request, url, config, text);
@@ -545,7 +565,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
       candidate = resolved.candidate;
       servedToken = resolved.token;
     }
-    const body = parsed === null || candidate.model === model ? text : parsed.withModel(candidate.model);
+    const body = parsed === null || agent !== null || candidate.model === parsed.model ? text : parsed.withModel(candidate.model);
     const translated = !takesNatively(candidate.credential.kind, route.format);
     const login = loginName(candidate);
     let response: Response;

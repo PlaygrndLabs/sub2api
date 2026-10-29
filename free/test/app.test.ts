@@ -500,6 +500,51 @@ describe("Vertex", () => {
   });
 });
 
+describe("Gemini Interactions keys", () => {
+  const CONFIG = {
+    "api-keys": {
+      interactions: [{ name: "native", keys: [{ "api-key": "AIza-int" }] }],
+      gemini: [{ name: "g", keys: [{ "api-key": "AIza-gen" }] }],
+    },
+  };
+
+  async function interactionsSetup(upstream?: (request: Request) => Promise<Response>) {
+    const fixture = await setup(upstream);
+    fixture.backend.table = { credentials: upstreamCredentials(CONFIG), claudeOAuth: false, codexOAuth: false };
+    return fixture;
+  }
+
+  it("sends Interactions requests to Interactions keys only, with models/ dropped", async () => {
+    const { config, seen } = await interactionsSetup();
+    const response = await handle(at(`/v1beta/interactions?alt=sse&key=${KEY}`, { method: "POST", body: JSON.stringify({ model: "models/gemini-2.5-flash", input: "hi", stream: true }) }), config);
+    expect(response.status).toBe(200);
+    expect(seen[0]?.url).toBe("https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse");
+    expect(seen[0]?.headers.get("x-goog-api-key")).toBe("AIza-int");
+    expect(await seen[0]?.json()).toEqual({ model: "gemini-2.5-flash", input: "hi", stream: true });
+  });
+
+  it("runs agents on any Interactions key, with the body untouched", async () => {
+    const { config, seen } = await interactionsSetup();
+    const body = JSON.stringify({ agent: "deep-research-pro-preview", input: "hi" });
+    await handle(post("/v1beta/interactions", JSON.parse(body)), config);
+    expect(seen[0]?.headers.get("x-goog-api-key")).toBe("AIza-int");
+    expect(await seen[0]?.text()).toBe(body);
+    const neither = await handle(post("/v1beta/interactions", { input: "hi" }), config);
+    expect(neither.status).toBe(400);
+    expect(await neither.json()).toMatchObject({ error: { message: "request requires exactly one of model or agent" } });
+  });
+
+  it("keeps Interactions keys away from other clients", async () => {
+    const { config, seen } = await interactionsSetup();
+    await handle(at(`/v1beta/models/gemini-2.5-flash:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(seen[0]?.headers.get("x-goog-api-key")).toBe("AIza-gen");
+    const { config: onlyInteractions, backend, seen: none } = await interactionsSetup();
+    backend.table = { credentials: upstreamCredentials({ "api-keys": { interactions: CONFIG["api-keys"].interactions } }), claudeOAuth: false, codexOAuth: false };
+    expect((await handle(post("/v1/chat/completions", { model: "gemini-2.5-flash", messages: [] }), onlyInteractions)).status).toBe(400);
+    expect(none).toHaveLength(0);
+  });
+});
+
 describe("Kimi logins", () => {
   it("serves Claude Code and both OpenAI formats untranslated, with Kimi's model names", async () => {
     const { config, backend, seen } = await setup();
