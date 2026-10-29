@@ -3,7 +3,7 @@
 [![ci](https://github.com/PlaygrndLabs/sub2api/actions/workflows/ci.yml/badge.svg)](https://github.com/PlaygrndLabs/sub2api/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Literally the [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA) project, deployed as a Cloudflare Worker in one click.** Turn your Claude, ChatGPT Codex and Gemini subscriptions into your own private API. Point Claude Code, the Anthropic or OpenAI SDKs, or any app at your gateway URL and use your subscription from anywhere, with no server or home machine left running.
+**Literally the [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA) project, deployed as a Cloudflare Worker in one click.** Turn your Claude, ChatGPT Codex, Gemini and Kimi subscriptions into your own private API. Point Claude Code, the Anthropic or OpenAI SDKs, or any app at your gateway URL and use your subscription from anywhere, with no server or home machine left running.
 
 Two ways to install. Both are free and open source, with the same dashboard; sub2api never charges you anything. Pick by the Cloudflare plan you already have:
 
@@ -64,7 +64,7 @@ curl https://sub2api.<your-subdomain>.workers.dev/v1/messages \
   -d '{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user","content":"Say hi"}]}'
 ```
 
-`GET /v1/models` lists what your subscriptions offer. Give each app its own key, so you can revoke one without touching the rest.
+On the Workers-only install the host is `sub2api-free.<your-subdomain>.workers.dev`. `GET /v1/models` lists what your subscriptions offer. Give each app its own key, so you can revoke one without touching the rest.
 
 ## How it works
 
@@ -75,6 +75,18 @@ app ──► Worker ──► Durable Object ──► Container: CPA ──►
 ```
 
 The Worker hands every request to one Durable Object in front of the CPA container. The Durable Object refuses API calls until a key exists and keeps the dashboard behind a password. CPA's S3 storage is served from an R2 binding, so you never create storage keys. See [SECURITY.md](SECURITY.md) for the full model.
+
+The **Workers-only** install has no container. The Worker runs our TypeScript port of CPA itself, and one Durable Object keeps logins, config, usage and logs:
+
+```
+app ──► Worker: CPA port ──► Claude / Codex / Gemini / Vertex / Kimi / xAI / OpenAI-compatible
+        · API key check         · any app format to any provider
+        · dashboard sign-in     · routing, failover, cooldowns
+          │
+          └─► Durable Object (SQLite): logins, config, usage, logs
+```
+
+See [free/README.md](free/README.md) for what it covers.
 
 ## Update
 
