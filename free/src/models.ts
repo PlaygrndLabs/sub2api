@@ -242,18 +242,18 @@ export function servedModels(table: RoutingTable, catalog: Catalog, now: number)
     if (known === undefined) served.set(model.id, { model, providers: [provider], upstream });
     else if (!known.providers.includes(provider)) known.providers.push(provider);
   };
-  const loginModels = { claude: table.claudeOAuth ? catalog.claude : [], codex: [] as CatalogModel[] };
-  if (table.codexOAuth) {
-    const plans = table.codexPlans === undefined || table.codexPlans.length === 0 ? [""] : table.codexPlans;
-    loginModels.codex = plans.flatMap((plan) => catalog[codexChannel(plan)]);
-  }
-  for (const provider of ["claude", "codex"] as const) for (const model of loginModels[provider]) add(provider, model);
+  const plans = table.codexPlans === undefined || table.codexPlans.length === 0 ? [""] : table.codexPlans;
+  const loginModels = {
+    claude: table.claudeOAuth ? catalog.claude : [],
+    codex: table.codexOAuth ? plans.flatMap((plan) => catalog[codexChannel(plan)]) : [],
+    vertex: table.vertexOAuth === true ? catalog.vertex : [],
+    kimi: table.kimiOAuth === true ? catalog.kimi : [],
+  };
+  for (const provider of ["claude", "codex", "vertex", "kimi"] as const) for (const model of loginModels[provider]) add(provider, model);
   // A prefixed login's models are listed as "prefix/model" too, like a prefixed key's.
   for (const login of table.logins ?? []) {
     if (login.prefix !== "") for (const model of loginModels[login.provider]) add(login.provider, { ...model, id: `${login.prefix}/${model.id}` }, model.id);
   }
-  if (table.vertexOAuth === true) for (const model of catalog.vertex) add("vertex", model);
-  if (table.kimiOAuth === true) for (const model of catalog.kimi) add("kimi", model);
   for (const credential of table.credentials) {
     for (const { model, upstream } of credentialModels(credential, catalog, now)) {
       add(credential.kind, model, upstream);
