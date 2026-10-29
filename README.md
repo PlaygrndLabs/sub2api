@@ -10,7 +10,7 @@ Two ways to install. Both are free and open source, with the same dashboard; sub
 | Install | Your Cloudflare plan | What runs | Deploy |
 |---|---|---|---|
 | **Container** | Workers Paid (Cloudflare bills $5/month; Containers need it) | The latest CPA release in a container, with its official dashboard | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="240"></a> |
-| **Workers-only** | Workers Free | Our container-free TypeScript rewrite of CPA with CPA's own dashboard (Claude and ChatGPT logins, API keys, format translation) | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="240"></a> |
+| **Workers-only** | Workers Free | Our container-free TypeScript rewrite of CPA with CPA's own dashboard (Claude, ChatGPT and Kimi logins, API keys, any client format to any provider) | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="240"></a> |
 
 ## Why
 
