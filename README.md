@@ -64,7 +64,7 @@ curl https://sub2api.<your-subdomain>.workers.dev/v1/messages \
   -d '{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user","content":"Say hi"}]}'
 ```
 
-On the Workers-only install the host is `sub2api-free.<your-subdomain>.workers.dev`. `GET /v1/models` lists what your subscriptions offer. Give each app its own key, so you can revoke one without touching the rest.
+On the Workers-only install the host is `sub2api.<your-subdomain>.workers.dev`. `GET /v1/models` lists what your subscriptions offer. Give each app its own key, so you can revoke one without touching the rest.
 
 ## How it works
 
