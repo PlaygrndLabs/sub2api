@@ -37,13 +37,15 @@ npx wrangler secret put DASHBOARD_PASSWORD   # at least 16 characters
 npx wrangler secret put MANAGEMENT_KEY       # at least 16 characters, not the dashboard password
 ```
 
-1. Open `https://sub2api-free.<your-subdomain>.workers.dev` and sign in with the dashboard password.
+The Worker is named `sub2api`, like the Container install, so put only one of the two on an account. Installs made before 2026-10-29 were named `sub2api-free`, and updating one creates a new, empty Worker. To keep your logins and keys, set `"name": "sub2api-free"` in `free/wrangler.jsonc` before you update.
+
+1. Open `https://sub2api.<your-subdomain>.workers.dev` and sign in with the dashboard password.
 2. CPA's dashboard opens and asks for the management key: enter `MANAGEMENT_KEY`.
 3. Under **OAuth Login**, press **+** on Claude, approve on Claude's page, then paste the `localhost` address you land on into **Callback URL**.
 4. Under **Config Panel**, add an API key and save, then point Claude Code at the gateway:
 
 ```bash
-export ANTHROPIC_BASE_URL=https://sub2api-free.<your-subdomain>.workers.dev
+export ANTHROPIC_BASE_URL=https://sub2api.<your-subdomain>.workers.dev
 export ANTHROPIC_API_KEY=<your gateway API key>
 claude
 ```
@@ -55,10 +57,10 @@ model_provider = "sub2api"
 
 [model_providers.sub2api]
 name = "sub2api"
-base_url = "https://sub2api-free.<your-subdomain>.workers.dev/backend-api/codex"
+base_url = "https://sub2api.<your-subdomain>.workers.dev/backend-api/codex"
 wire_api = "responses"
 env_key = "SUB2API_KEY"
-model_catalog_url = "https://sub2api-free.<your-subdomain>.workers.dev/v1/models"
+model_catalog_url = "https://sub2api.<your-subdomain>.workers.dev/v1/models"
 ```
 
 `model_catalog_url` makes the Codex CLI's model picker list every model the gateway serves (Claude, Gemini and the rest, not only ChatGPT's), in the CLI's own catalog format, as CPA answers it. Leave it out to keep the CLI's built-in list.

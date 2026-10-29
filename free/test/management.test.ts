@@ -26,7 +26,7 @@ describe("config", () => {
   it("reads the whole tree, one path, and the raw YAML with the same ETag", async () => {
     const { call } = setup();
     const tree = await call("GET", "config");
-    expect(tree.headers.get("x-cpa-version")).toBe("sub2api-free");
+    expect(tree.headers.get("x-cpa-version")).toBe("sub2api");
     expect(await tree.json()).toMatchObject({ "config-version": 8, access: { "api-keys": [] } });
     expect(await (await call("GET", "config/routing/strategy")).json()).toBe("round-robin");
     expect((await call("GET", "config/nope")).status).toBe(404);

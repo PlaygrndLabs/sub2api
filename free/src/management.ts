@@ -12,7 +12,7 @@ import { serviceAccountOf, signingKey, validLocation, vertexFileData, vertexFile
 // installs. The Worker has already checked the dashboard session and the management key.
 
 export const MANAGEMENT_PREFIX = "/v8/management";
-export const GATEWAY_VERSION = "sub2api-free";
+export const GATEWAY_VERSION = "sub2api";
 // CPA's provider names and their aliases.
 const OAUTH_ALIASES: Record<string, OAuthProvider> = { claude: "claude", anthropic: "claude", codex: "codex", openai: "codex", kimi: "kimi", "kimi-ai": "kimi" };
 
