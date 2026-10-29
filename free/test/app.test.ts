@@ -40,10 +40,11 @@ class FakeBackend implements Backend {
   }
   vertexResult: TokenResult = { ok: true, accessToken: "ya29.vertex", expiresAt: NOW + 3600, endpoint: "https://us-central1-aiplatform.googleapis.com/v1/projects/p-1/locations/us-central1/publishers/google/models", name: "vertex-p-1.json" };
   kimiResult: TokenResult = { ok: true, accessToken: "kimi-at", expiresAt: NOW + 3600, endpoint: "https://api.kimi.com/coding", headers: { "user-agent": "sub2api", "x-msh-platform": "sub2api", "x-msh-device-id": "dev-1" }, name: "kimi-1.json" };
-  async loginToken(provider: string) {
-    this.calls.push(`loginToken:${provider}`);
-    if (provider === "kimi") return this.kimiResult;
-    return this.vertexResult;
+  async loginToken(provider: string, name?: string) {
+    this.calls.push(name === undefined ? `loginToken:${provider}` : `loginToken:${provider}:${name}`);
+    const result = provider === "kimi" ? this.kimiResult : this.vertexResult;
+    if (name === undefined) return result;
+    return this.named[name] ?? (result.ok ? { ...result, accessToken: `${result.accessToken}-${name}`, name } : result);
   }
   async invalidate(accessToken: string) {
     this.invalidated.push(accessToken);
@@ -486,7 +487,7 @@ describe("Vertex", () => {
     const response = await handle(at(`/v1beta/models/gemini-2.5-flash:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
     expect(response.status).toBe(401);
     expect(backend.invalidated).toEqual(["ya29.vertex"]);
-    expect(config.cache.logins.has("vertex")).toBe(false);
+    expect(config.cache.logins.has("vertex:")).toBe(false);
   });
 
   it("explains a service account that can't mint a token, in the client's shape", async () => {
@@ -1158,6 +1159,44 @@ describe("routing across logins and keys", () => {
     await handle(messages({ "x-api-key": KEY }), config);
     await handle(messages({ "x-api-key": KEY }), config);
     expect(seen.map(tokenOf)).toEqual(["Bearer access-a.json", "Bearer access-b.json", "Bearer access-b.json", "Bearer access-a.json"]);
+  });
+  it("moves on to the next Kimi login when one is rate limited, and cools only that login", async () => {
+    const limited = async (request: Request) => (tokenOf(request) === "Bearer kimi-at-k1.json" ? new Response("{}", { status: 429, headers: { "retry-after": "90" } }) : new Response("{}"));
+    const { config, backend, seen, settle } = await loginsSetup(limited, [login("k1.json", "kimi"), login("k2.json", "kimi")]);
+    backend.table = { ...backend.table, claudeOAuth: false, kimiOAuth: true };
+    expect((await handle(post("/v1/chat/completions", { model: "kimi-k3", messages: [] }), config)).status).toBe(200);
+    expect((await handle(post("/v1/chat/completions", { model: "kimi-k3", messages: [] }), config)).status).toBe(200);
+    expect(seen.map(tokenOf)).toEqual(["Bearer kimi-at-k1.json", "Bearer kimi-at-k2.json", "Bearer kimi-at-k2.json"]);
+    expect(backend.calls.filter((call) => call.startsWith("loginToken:"))).toEqual(["loginToken:kimi:k1.json", "loginToken:kimi:k2.json"]);
+    await settle();
+    expect(backend.cooled).toEqual([{ id: "file:k1.json", model: "k3", until: NOW + 90, reason: "quota", status: 429, level: 0 }]);
+    expect(backend.recorded[0]?.attempts).toEqual([
+      { key: "file:k1.json", ok: false },
+      { key: "file:k2.json", ok: true },
+    ]);
+  });
+
+  it("fails over between Vertex logins, refreshing only the refused one's token", async () => {
+    const refusing = async (request: Request) => (tokenOf(request) === "Bearer ya29.vertex-v1.json" ? new Response("no", { status: 401 }) : new Response("{}"));
+    const { config, backend, seen } = await loginsSetup(refusing, [login("v1.json", "vertex"), login("v2.json", "vertex", { prefix: "team" })]);
+    backend.table = { ...backend.table, claudeOAuth: false, vertexOAuth: true };
+    expect((await handle(at(`/v1beta/models/gemini-2.5-flash:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config)).status).toBe(200);
+    expect(seen.map(tokenOf)).toEqual(["Bearer ya29.vertex-v1.json", "Bearer ya29.vertex-v2.json"]);
+    expect(backend.invalidated).toEqual(["ya29.vertex-v1.json"]);
+    expect(config.cache.logins.has("vertex:v1.json")).toBe(false);
+    expect(config.cache.logins.has("vertex:v2.json")).toBe(true);
+    // "team/..." picks the login with that prefix.
+    await handle(at(`/v1beta/models/team%2Fgemini-2.5-pro:generateContent?key=${KEY}`, { method: "POST", body: "{}" }), config);
+    expect(seen[2]?.url).toMatch(/\/gemini-2\.5-pro:generateContent$/);
+    expect(tokenOf(seen[2])).toBe("Bearer ya29.vertex-v2.json");
+  });
+
+  it("explains a Kimi login that can't get a token, then tries the next", async () => {
+    const { config, backend, seen } = await loginsSetup(async () => new Response("{}"), [login("k1.json", "kimi"), login("k2.json", "kimi")]);
+    backend.table = { ...backend.table, claudeOAuth: false, kimiOAuth: true };
+    backend.named["k1.json"] = { ok: false, status: 503, message: "Kimi refused the refresh token" };
+    expect((await handle(post("/v1/chat/completions", { model: "kimi-k3", messages: [] }), config)).status).toBe(200);
+    expect(seen.map(tokenOf)).toEqual(["Bearer kimi-at-k2.json"]);
   });
 });
 

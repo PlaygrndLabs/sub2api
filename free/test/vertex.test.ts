@@ -82,6 +82,11 @@ describe("Vertex service accounts", () => {
     now += 3500;
     expect(await account.loginToken("vertex")).toMatchObject({ accessToken: "ya29.2" });
     expect(assertions).toHaveLength(2);
+    // Each service account is routed on its own, fetched by name, and only as Vertex.
+    expect((await account.routing()).logins).toEqual([{ name: "vertex-proj-1.json", provider: "vertex", priority: 0, weight: 1, prefix: "", disableCooling: null, requestRetry: null }]);
+    expect(await account.loginToken("vertex", "vertex-proj-1.json")).toMatchObject({ accessToken: "ya29.2" });
+    expect(await account.loginToken("vertex", "other.json")).toMatchObject({ ok: false, status: 503 });
+    expect(await account.loginToken("kimi", "vertex-proj-1.json")).toMatchObject({ ok: false, status: 503 });
   });
 
   it("refuses files that aren't usable service accounts, and odd locations", async () => {
