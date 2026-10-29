@@ -39,6 +39,8 @@ export interface CatalogModel {
   readonly supportedGenerationMethods?: readonly string[];
   readonly supportedInputModalities?: readonly string[];
   readonly supportedOutputModalities?: readonly string[];
+  // The reasoning efforts a model takes; a model thinking by token budget has no levels.
+  readonly thinking?: { readonly levels?: readonly string[] };
 }
 
 export type Catalog = Readonly<Record<Channel, readonly CatalogModel[]>>;
@@ -46,6 +48,10 @@ export type Catalog = Readonly<Record<Channel, readonly CatalogModel[]>>;
 const TEXT_FIELDS = ["owned_by", "type", "display_name", "version", "description"] as const;
 const NUMBER_FIELDS = ["created", "context_length", "max_completion_tokens", "inputTokenLimit", "outputTokenLimit"] as const;
 const LIST_FIELDS = ["supportedGenerationMethods", "supportedInputModalities", "supportedOutputModalities"] as const;
+
+function stringList(list: readonly unknown[]): string[] {
+  return list.filter((item): item is string => typeof item === "string" && item.length <= 64).slice(0, 32);
+}
 
 function catalogModel(value: unknown): CatalogModel | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -62,7 +68,12 @@ function catalogModel(value: unknown): CatalogModel | null {
   }
   for (const field of LIST_FIELDS) {
     const list = entry[field];
-    if (Array.isArray(list)) model[field] = list.filter((item): item is string => typeof item === "string" && item.length <= 64).slice(0, 32);
+    if (Array.isArray(list)) model[field] = stringList(list);
+  }
+  const thinking = entry.thinking;
+  if (typeof thinking === "object" && thinking !== null) {
+    const levels = (thinking as { levels?: unknown }).levels;
+    model.thinking = Array.isArray(levels) ? { levels: stringList(levels) } : {};
   }
   return model as unknown as CatalogModel;
 }
@@ -196,44 +207,60 @@ const OWNER: Record<ProviderKind, { owned_by: string; type: string; channel: Cha
   "openai-compatibility": { owned_by: "", type: "openai-compatibility", channel: null },
 };
 
-// The models one API key serves, by the names clients ask for, before its prefix.
-function credentialModels(credential: UpstreamCredential, catalog: Catalog, now: number): CatalogModel[] {
+// The models one API key serves, by the names clients ask for (before its prefix), with the
+// upstream names they stand for.
+function credentialModels(credential: UpstreamCredential, catalog: Catalog, now: number): { model: CatalogModel; upstream: string }[] {
   const owner = OWNER[credential.kind];
   if (credential.models.length > 0) {
     const compat = credential.kind === "openai-compatibility";
     return credential.models
       .filter((mapping) => !excluded(mapping.name, credential.excluded))
-      .map((mapping) => ({ id: mapping.alias, created: now, owned_by: compat ? credential.group : owner.owned_by, type: owner.type, display_name: compat ? mapping.alias : mapping.name }));
+      .map((mapping) => ({
+        model: { id: mapping.alias, created: now, owned_by: compat ? credential.group : owner.owned_by, type: owner.type, display_name: compat ? mapping.alias : mapping.name },
+        upstream: mapping.name,
+      }));
   }
   if (owner.channel === null) return [];
-  return catalog[owner.channel].filter((model) => !excluded(model.id, credential.excluded));
+  return catalog[owner.channel].filter((model) => !excluded(model.id, credential.excluded)).map((model) => ({ model, upstream: model.id }));
+}
+
+// A listed model with the providers serving it and the upstream name it stands for, which the
+// Codex CLI's catalog needs.
+export interface ServedModel {
+  readonly model: CatalogModel;
+  readonly providers: string[];
+  readonly upstream: string;
 }
 
 // Every model clients can ask for by name, once each: the logins' first, then the API keys'
 // in config order. A prefixed key's models are listed both bare and as "prefix/model", as in
 // CPA, since the bare name reaches them too.
-export function availableModels(table: RoutingTable, catalog: Catalog, now: number): CatalogModel[] {
-  const seen = new Set<string>();
-  const models: CatalogModel[] = [];
-  const add = (model: CatalogModel) => {
-    if (seen.has(model.id)) return;
-    seen.add(model.id);
-    models.push(model);
+export function servedModels(table: RoutingTable, catalog: Catalog, now: number): ServedModel[] {
+  const served = new Map<string, ServedModel>();
+  const add = (provider: string, model: CatalogModel, upstream = model.id) => {
+    const known = served.get(model.id);
+    if (known === undefined) served.set(model.id, { model, providers: [provider], upstream });
+    else if (!known.providers.includes(provider)) known.providers.push(provider);
   };
-  if (table.claudeOAuth) catalog.claude.forEach(add);
-  if (table.codexOAuth) {
-    const plans = table.codexPlans === undefined || table.codexPlans.length === 0 ? [""] : table.codexPlans;
-    for (const plan of plans) catalog[codexChannel(plan)].forEach(add);
+  const plans = table.codexPlans === undefined || table.codexPlans.length === 0 ? [""] : table.codexPlans;
+  const loginModels = {
+    claude: table.claudeOAuth ? catalog.claude : [],
+    codex: table.codexOAuth ? plans.flatMap((plan) => catalog[codexChannel(plan)]) : [],
+    vertex: table.vertexOAuth === true ? catalog.vertex : [],
+    kimi: table.kimiOAuth === true ? catalog.kimi : [],
+  };
+  for (const provider of ["claude", "codex", "vertex", "kimi"] as const) for (const model of loginModels[provider]) add(provider, model);
+  // A prefixed login's models are listed as "prefix/model" too, like a prefixed key's.
+  for (const login of table.logins ?? []) {
+    if (login.prefix !== "") for (const model of loginModels[login.provider]) add(login.provider, { ...model, id: `${login.prefix}/${model.id}` }, model.id);
   }
-  if (table.vertexOAuth === true) catalog.vertex.forEach(add);
-  if (table.kimiOAuth === true) catalog.kimi.forEach(add);
   for (const credential of table.credentials) {
-    for (const model of credentialModels(credential, catalog, now)) {
-      add(model);
-      if (credential.prefix !== "") add({ ...model, id: `${credential.prefix}/${model.id}` });
+    for (const { model, upstream } of credentialModels(credential, catalog, now)) {
+      add(credential.kind, model, upstream);
+      if (credential.prefix !== "") add(credential.kind, { ...model, id: `${credential.prefix}/${model.id}` }, upstream);
     }
   }
-  return models;
+  return [...served.values()];
 }
 
 // OpenAI's GET /v1/models, with the four fields CPA keeps.

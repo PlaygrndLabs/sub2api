@@ -14,13 +14,13 @@ describe("model catalog", () => {
       catalogWith([
         { id: "claude-new", display_name: "Claude New", created: 1_790_000_000, context_length: 1e6, thinking: { max: 1 }, description: "x".repeat(5000) },
         { id: "<script>" },
-        { id: "claude-odd", created: -1, owned_by: 7, supportedInputModalities: ["text", 3] },
+        { id: "claude-odd", created: -1, owned_by: 7, supportedInputModalities: ["text", 3], thinking: { levels: ["low", 2, "high"] } },
         "not a model",
       ]),
     );
     expect(parsed?.claude).toEqual([
-      { id: "claude-new", display_name: "Claude New", created: 1_790_000_000, context_length: 1e6, description: "x".repeat(1000) },
-      { id: "claude-odd", supportedInputModalities: ["text"] },
+      { id: "claude-new", display_name: "Claude New", created: 1_790_000_000, context_length: 1e6, description: "x".repeat(1000), thinking: {} },
+      { id: "claude-odd", supportedInputModalities: ["text"], thinking: { levels: ["low", "high"] } },
     ]);
   });
 

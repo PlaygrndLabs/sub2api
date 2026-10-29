@@ -380,6 +380,18 @@ describe("API-key providers", () => {
     expect(seen).toHaveLength(1);
   });
 
+  it("answers the Codex CLI's catalog request in Codex's own format", async () => {
+    const { config, backend } = await providersSetup();
+    backend.table = { ...backend.table, codexOAuth: true, codexPlans: ["pro"] };
+    const response = await handle(at("/v1/models?client_version=0.157.0", { headers: { authorization: `Bearer ${KEY}` } }), config);
+    expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    const body = (await response.json()) as { models: { slug: string; base_instructions: string }[] };
+    const slugs = body.models.map((model) => model.slug);
+    expect(slugs).toEqual(expect.arrayContaining(["gpt-6-astra", "claude-sonnet-4-6", "work/claude-sonnet-4-6", "kimi", "gemini-2.5-flash"]));
+    expect(body.models.find((model) => model.slug === "gpt-6-astra")?.base_instructions.length).toBeGreaterThan(10_000);
+    expect((await handle(at("/v1/models?client_version=0.157.0"), config)).status).toBe(401);
+  });
+
   it("lists nothing when nothing is configured", async () => {
     const { config, backend } = await setup();
     backend.table = { credentials: [], claudeOAuth: false, codexOAuth: false };
