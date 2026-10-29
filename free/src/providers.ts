@@ -81,7 +81,7 @@ export interface UpstreamCredential {
 // One enabled subscription login, with the routing fields CPA reads from its auth file.
 export interface LoginEntry {
   readonly name: string;
-  readonly provider: "claude" | "codex";
+  readonly provider: "claude" | "codex" | "kimi" | "vertex";
   readonly priority: number;
   readonly weight: number;
   readonly prefix: string;

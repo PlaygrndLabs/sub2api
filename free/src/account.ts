@@ -34,7 +34,7 @@ export interface Backend {
   // A login's token by its file name, or, with no name, the next login's in turn.
   token(name?: string): Promise<TokenResult>;
   codexToken(name?: string): Promise<TokenResult>;
-  loginToken(provider: ServedLogin): Promise<TokenResult>;
+  loginToken(provider: ServedLogin, name?: string): Promise<TokenResult>;
   invalidate(accessToken: string): Promise<void>;
   attemptAllowed(client: string): Promise<boolean>;
   manage(request: Request): Promise<Response>;
@@ -74,11 +74,11 @@ function numberOf(value: unknown): number {
 }
 
 // CPA reads a login's routing fields from the top level of its auth file.
-function loginEntry(file: CredentialFile): LoginEntry {
+function loginEntry(file: CredentialFile, provider: LoginEntry["provider"]): LoginEntry {
   const data = file.data;
   return {
     name: file.name,
-    provider: file.provider === "codex" ? "codex" : "claude",
+    provider,
     priority: numberOf(data.priority),
     weight: weightOf(data.weight),
     prefix: textOf(data.prefix),
@@ -145,17 +145,15 @@ export class Account {
     const tree = this.currentConfig().read([]);
     this.upstreams ??= upstreamCredentials(tree);
     this.settings ??= routingSettings(tree);
-    // Claude and ChatGPT logins are routed one by one; Kimi and Vertex still take turns in the Durable Object.
-    const files = (["claude", "codex"] as const).flatMap((provider) => this.loginFiles(provider));
-    const logins = files.map(loginEntry);
-    const codexPlans = files.filter((file) => file.provider === "codex").map((file) => (typeof file.data.plan_type === "string" ? file.data.plan_type : ""));
+    const logins = LOGIN_PROVIDERS.flatMap((provider) => this.loginFiles(provider).map((file) => loginEntry(file, provider)));
+    const codexPlans = this.loginFiles("codex").map((file) => (typeof file.data.plan_type === "string" ? file.data.plan_type : ""));
     return {
       credentials: this.upstreams,
       claudeOAuth: logins.some((login) => login.provider === "claude"),
       codexOAuth: logins.some((login) => login.provider === "codex"),
       codexPlans,
-      vertexOAuth: this.loginFiles("vertex").length > 0,
-      kimiOAuth: this.loginFiles("kimi").length > 0,
+      vertexOAuth: logins.some((login) => login.provider === "vertex"),
+      kimiOAuth: logins.some((login) => login.provider === "kimi"),
       logins,
       settings: this.settings,
       cooldowns: this.vault.cooldowns(this.nowSeconds()),
