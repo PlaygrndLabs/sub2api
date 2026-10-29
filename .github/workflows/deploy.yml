@@ -19,7 +19,8 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    # Opt-in: set the DEPLOY_CONTAINER repository variable to true to deploy the Container install.
+    if: vars.DEPLOY_CONTAINER == 'true' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
     runs-on: ubuntu-latest
     # The Cloudflare token goes only to the steps that call Cloudflare, never to npm install
     # scripts or the upstream CPA build in the smoke test.

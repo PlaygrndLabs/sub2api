@@ -110,7 +110,7 @@ npx wrangler deploy        # needs Docker to build the image
 sh scripts/set-secrets.sh  # generates both secrets, stores them, prints them once
 ```
 
-To deploy from GitHub Actions, add the repository secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts, Containers, Workers R2 Storage: Edit) and `CLOUDFLARE_ACCOUNT_ID`. Every green `ci` run on `main` then deploys.
+To deploy from GitHub Actions, add the repository secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts, Containers, Workers R2 Storage: Edit) and `CLOUDFLARE_ACCOUNT_ID`, and set the repository variable `DEPLOY_CONTAINER` to `true`. Every green `ci` run on `main` then deploys, and a weekly run picks up the newest CPA release.
 
 `MANAGEMENT_KEY` seeds CPA's config on first start only; after that, change it in the dashboard. `DASHBOARD_PASSWORD` can be changed any time with `wrangler secret put DASHBOARD_PASSWORD`.
 </details>
