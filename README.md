@@ -9,8 +9,8 @@ Two ways to install. Both are free and open source, with the same dashboard; sub
 
 | Install | Your Cloudflare plan | What runs | Deploy |
 |---|---|---|---|
-| **Workers&#8209;only** | Workers Free | Our TypeScript port of CPA:<br>any app to any provider | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="240"></a> |
-| **Container** | Workers Paid<br>($5/month, for Containers) | The latest CPA release<br>in a container | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="240"></a> |
+| **Workers&#8209;only** | Workers Free | Our TypeScript port of CPA:<br>any app to any provider | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
+| **Container** | Workers Paid<br>($5/month, for Containers) | The latest CPA release<br>in a container | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
 
 ## Why
 
