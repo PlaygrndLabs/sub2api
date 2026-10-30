@@ -1,0 +1,4 @@
+# The Deploy to Cloudflare button asks for these secrets. These placeholders are too short to work,
+# so the dashboard stays off until you replace them. `openssl rand -hex 24` makes one.
+DASHBOARD_PASSWORD=replace-me
+MANAGEMENT_KEY=replace-me-too
