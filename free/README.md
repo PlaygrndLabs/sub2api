@@ -27,14 +27,13 @@ You need a Cloudflare account. The free plan is enough.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free)
 
-It asks for `DASHBOARD_PASSWORD` and `MANAGEMENT_KEY`, each at least 16 characters and different from each other, as on the Container install. Or from a clone:
+Before the first deploy, it asks for `DASHBOARD_PASSWORD` and `MANAGEMENT_KEY`, each at least 16 characters and different from each other, as on the Container install. `openssl rand -hex 24` makes one. Or from a clone:
 
 ```bash
 cd free && npm ci
 npx wrangler login
 npx wrangler deploy
-npx wrangler secret put DASHBOARD_PASSWORD   # at least 16 characters
-npx wrangler secret put MANAGEMENT_KEY       # at least 16 characters, not the dashboard password
+sh ../scripts/set-secrets.sh   # generates both secrets, stores them, prints them once
 ```
 
 The Worker is named `sub2api`, like the Container install, so put only one of the two on an account. Installs made before 2026-10-29 were named `sub2api-free`, and updating one creates a new, empty Worker. To keep your logins and keys, set `"name": "sub2api-free"` in `free/wrangler.jsonc` before you update.
