@@ -7,13 +7,13 @@
   },
   "include": [
     "test/s3-server.ts",
-    "workers/test/sqlite.ts",
-    "workers/test/account.test.ts",
-    "workers/test/management.test.ts",
-    "workers/test/codex.test.ts",
-    "workers/test/usage.test.ts",
-    "workers/test/vertex.test.ts",
-    "workers/test/kimi.test.ts"
+    "worker/test/sqlite.ts",
+    "worker/test/account.test.ts",
+    "worker/test/management.test.ts",
+    "worker/test/codex.test.ts",
+    "worker/test/usage.test.ts",
+    "worker/test/vertex.test.ts",
+    "worker/test/kimi.test.ts"
   ],
   "exclude": []
 }

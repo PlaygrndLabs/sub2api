@@ -25,7 +25,7 @@ Not included yet: Gemini and other OAuth logins, and CPA's per-request detail lo
 
 You need a Cloudflare account. Workers Free is enough.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/workers)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/worker)
 
 Before the first deploy, it asks for `DASHBOARD_PASSWORD` and `MANAGEMENT_KEY`, each at least 16 characters and different from each other, as on the Container install. `openssl rand -hex 24` makes one. Or from a clone:
 
@@ -36,7 +36,7 @@ npx wrangler deploy
 sh ../scripts/set-secrets.sh   # generates both secrets, stores them, prints them once
 ```
 
-The Worker is named `sub2api`, like the Container install, so put only one of the two on an account. Installs made before 2026-10-29 were named `sub2api-free`, and updating one creates a new, empty Worker. To keep your logins and keys, set `"name": "sub2api-free"` in `workers/wrangler.jsonc` before you update.
+The Worker is named `sub2api`, like the Container install, so put only one of the two on an account. Installs made before 2026-10-29 were named `sub2api-free`, and updating one creates a new, empty Worker. To keep your logins and keys, set `"name": "sub2api-free"` in `worker/wrangler.jsonc` before you update.
 
 1. Open `https://sub2api.<your-subdomain>.workers.dev` and sign in with the dashboard password.
 2. CPA's dashboard opens and asks for the management key: enter `MANAGEMENT_KEY`.
@@ -70,7 +70,7 @@ The management API sits behind both the sign-in cookie and the management key. I
 
 ## Deploying from GitHub
 
-With `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` set as repository secrets (the same ones the Container deploy uses), `.github/workflows/deploy-workers.yml` deploys this Worker whenever `workers/` changes on `main`. Add a gateway API key as the `SUB2API_WORKERS_TEST_KEY` secret (the old name `SUB2API_FREE_TEST_KEY` still works) and each deploy also runs Claude Code through the gateway: one short prompt and one long streamed answer. To freeze the dashboard, set the `PANEL_VERSION` and `PANEL_SHA256` repository variables; each build log prints the SHA-256 of the dashboard it downloaded.
+With `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` set as repository secrets (the same ones the Container deploy uses), `.github/workflows/deploy-worker.yml` deploys this Worker whenever `worker/` changes on `main`. Add a gateway API key as the `SUB2API_WORKER_TEST_KEY` secret (the old name `SUB2API_FREE_TEST_KEY` still works) and each deploy also runs Claude Code through the gateway: one short prompt and one long streamed answer. To freeze the dashboard, set the `PANEL_VERSION` and `PANEL_SHA256` repository variables; each build log prints the SHA-256 of the dashboard it downloaded.
 
 ## Checked live
 

@@ -1,5 +1,5 @@
 {
-  "name": "sub2api-workers",
+  "name": "sub2api-worker",
   "description": "sub2api for the Cloudflare Workers Free plan: a TypeScript gateway that needs no container.",
   "license": "MIT",
   "private": true,

@@ -1,6 +1,6 @@
 import type { KeyGuard } from "./key-guard.ts";
 import { classify } from "./routes.ts";
-import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "../workers/src/session.ts";
+import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "../worker/src/session.ts";
 import { loginPage, messagePage } from "./login-page.ts";
 
 export type Forward = (request: Request) => Promise<Response>;
