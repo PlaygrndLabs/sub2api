@@ -1,6 +1,7 @@
 import { Container } from "@cloudflare/containers";
 import type { Env } from "./env.ts";
 import { handle } from "./gateway.ts";
+import { takeImport } from "./import-config.ts";
 import { KeyGuard } from "./key-guard.ts";
 import { handleS3 } from "./s3.ts";
 
@@ -25,6 +26,11 @@ export class Cpa extends Container<Env> {
       OBJECTSTORE_SECRET_KEY: "r2-binding",
       CPA_MANAGEMENT_KEY: env.MANAGEMENT_KEY ?? "",
     };
+    // Runs before any request, so the container never starts without a waiting import.
+    void ctx.blockConcurrencyWhile(async () => {
+      const imported = await takeImport(env.STATE);
+      if (imported !== null) this.envVars = { ...this.envVars, CPA_IMPORT_CONFIG: imported };
+    });
   }
 
   override fetch(request: Request): Promise<Response> {
