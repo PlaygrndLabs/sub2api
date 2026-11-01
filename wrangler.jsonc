@@ -7,6 +7,7 @@
   "observability": { "enabled": true },
   "containers": [
     {
+      "name": "sub2api",
       "class_name": "Cpa",
       "image": "./container/Dockerfile",
       "image_build_context": "./container",
