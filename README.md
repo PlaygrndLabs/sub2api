@@ -90,10 +90,27 @@ See [worker/README.md](worker/README.md) for what it covers.
 
 ## Limits of the Workers-only install
 
-- ChatGPT (Codex) logins can't serve text requests, WebRTC voice calls or quota checks. Use a ChatGPT login on the Container install, or a Codex API key.
-- Claude logins serve Claude Code only. Other apps reach Claude through a Claude API key.
-- Logins for Claude, ChatGPT and Kimi only, plus Vertex service accounts. No per-request detail logs, and no Realtime client secrets, sideband sockets, SIP or translations.
-- Workers Free allows 100,000 requests a day and 10 ms of CPU per request. Very long translated conversations can run past it, and a request makes at most 10 upstream attempts.
+The Workers-only install is a smaller rewrite of CPA that fits the free plan. If you need anything marked **No**, use the Container install.
+
+| Feature | Container | Workers&#8209;only |
+|---|---|---|
+| ChatGPT (Codex) login: text and code | Yes | **No** (use a Codex API key) |
+| ChatGPT login: voice | WebSocket and WebRTC | WebSocket only, not yet tested live |
+| ChatGPT login: quota in the dashboard | Yes | **No** |
+| Claude login | Any app | Claude Code only (other apps need a Claude API key) |
+| Logins | Every CPA provider | Claude, ChatGPT, Kimi, and Vertex service accounts |
+| Images, video, speech (`/v1/images`, `/v1/videos`, `/v1/audio/speech`) | Yes | **No** |
+| Responses WebSocket, `/v1/responses/compact`, legacy `/v1/completions` | Yes | **No** |
+| Realtime client secrets, sideband, SIP, translations | Yes | **No** |
+| Request logs | Full detail | Last 2,000 lines, no request detail |
+| Gemini safety filters | Off, as in CPA | Google's defaults |
+
+Workers Free also caps every account ([Workers](https://developers.cloudflare.com/workers/platform/limits/), [Durable Objects](https://developers.cloudflare.com/durable-objects/platform/pricing/)). Past a cap, calls fail until 00:00 UTC:
+
+- **100,000 requests a day**, for the Worker and for its Durable Object. Each API call uses both.
+- **10 ms of CPU per request.** Claude Code and Codex CLI calls use under 1 ms, but a very long conversation translated between formats can run out and fail.
+- **50 outgoing requests per request**, so a call tries at most 10 logins or keys before it gives up.
+- **5 GB of storage** in total.
 
 Moving to Workers Paid? `sh scripts/move-to-container.sh`, or the **move to container** workflow, copies your logins, API keys and config into the Container install's R2 bucket and keeps a backup there. Add `--replace` (the workflow's `replace` step) to then swap the Worker for the Container install.
 
