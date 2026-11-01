@@ -1312,3 +1312,85 @@ describe("Gemini clients on other providers", () => {
     expect(await refused.json()).toEqual({ error: { code: 403, message: expect.any(String), status: "PERMISSION_DENIED" } });
   });
 });
+
+describe("Realtime voice on ChatGPT logins", () => {
+  const socket = (path = "/v1/realtime?model=gpt-realtime", headers: Record<string, string> = {}) => at(path, { headers: { authorization: `Bearer ${KEY}`, upgrade: "websocket", ...headers } });
+
+  it("opens OpenAI's Realtime WebSocket with the login's token and only protocol headers", async () => {
+    const { config, seen } = await setup(async () => new Response("no socket in Node", { status: 503 }));
+    await handle(socket("/v1/realtime?model=gpt-realtime&key=leak", { "sec-websocket-protocol": `realtime, openai-insecure-api-key.${KEY}`, "x-session-id": "s-1", cookie: "a=b", "x-api-key": KEY }), config);
+    const [upstream] = seen;
+    expect(upstream?.url).toBe("https://api.openai.com/v1/realtime?model=gpt-realtime");
+    expect(upstream?.headers.get("upgrade")).toBe("websocket");
+    expect(upstream?.headers.get("authorization")).toBe("Bearer chatgpt-1");
+    expect(upstream?.headers.get("chatgpt-account-id")).toBe("acct-1");
+    expect(upstream?.headers.get("originator")).toBe("Codex Desktop");
+    expect(upstream?.headers.get("x-session-id")).toBe("s-1");
+    // The gateway key never leaves, whether in a header, the query or a subprotocol.
+    expect(upstream?.headers.get("sec-websocket-protocol")).toBe("realtime");
+    expect(upstream?.headers.get("cookie")).toBeNull();
+    expect(upstream?.headers.get("x-api-key")).toBeNull();
+  });
+
+  it("refuses a bad key, a plain GET and unported endpoints before calling upstream", async () => {
+    const { config, seen } = await setup();
+    expect((await handle(socket("/v1/realtime", { authorization: "Bearer wrong" }), config)).status).toBe(401);
+    const plain = await handle(at("/v1/realtime", { headers: { authorization: `Bearer ${KEY}` } }), config);
+    expect(plain.status).toBe(426);
+    expect(plain.headers.get("upgrade")).toBe("websocket");
+    for (const path of ["/v1/realtime/client_secrets", "/v1/realtime/sessions"]) {
+      const response = await handle(at(path, { method: "POST", headers: { authorization: `Bearer ${KEY}` }, body: "{}" }), config);
+      expect(response.status).toBe(501);
+      expect(await response.json()).toMatchObject({ error: { code: "realtime_capability_not_supported" } });
+    }
+    expect((await handle(socket("/v1/realtime?call_id=rtc_1"), config)).status).toBe(501);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("says a ChatGPT login is needed when none is connected", async () => {
+    const { config, backend, seen } = await setup();
+    backend.codexResult = { ok: false, status: 503, message: "No ChatGPT account is connected yet: add one under OAuth login in the dashboard." };
+    const response = await handle(socket(), config);
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as { error: { message: string } }).error.message).toMatch(/^Voice needs a ChatGPT login\./);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("reports a refused handshake and has the token refreshed", async () => {
+    const { config, backend } = await setup(async () => Response.json({ error: { message: "bad token" } }, { status: 401 }));
+    const response = await handle(socket(), config);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({ error: { message: "bad token", type: "authentication_error", code: "realtime_upstream_unauthorized" } });
+    expect(backend.invalidated).toEqual(["chatgpt-1"]);
+  });
+
+  it("sends a WebRTC offer to ChatGPT's call endpoint with the live model", async () => {
+    const answer = new Response("v=0 answer", { status: 201, headers: { "content-type": "application/sdp", location: "/v1/realtime/calls/rtc_abc", "set-cookie": "s=1", "x-request-id": "req-1" } });
+    const { config, seen } = await setup(async () => answer);
+    const body = new FormData();
+    body.set("sdp", "v=0 offer");
+    body.set("session", JSON.stringify({ type: "realtime", model: "gpt-realtime-2.1", audio: { output: { voice: "marin" } } }));
+    const response = await handle(at("/v1/realtime/calls", { method: "POST", headers: { authorization: `Bearer ${KEY}` }, body }), config);
+    expect(response.status).toBe(201);
+    expect(await response.text()).toBe("v=0 answer");
+    expect(response.headers.get("location")).toBe("/v1/realtime/calls/rtc_abc");
+    expect(response.headers.get("x-request-id")).toBe("req-1");
+    expect(response.headers.get("set-cookie")).toBeNull();
+    const [upstream] = seen;
+    expect(upstream?.url).toBe("https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas");
+    expect(upstream?.headers.get("authorization")).toBe("Bearer chatgpt-1");
+    expect(upstream?.headers.get("content-type")).toBe("application/json");
+    expect(await upstream?.json()).toEqual({ sdp: "v=0 offer", session: { type: "realtime", model: "gpt-live-1-codex", audio: { output: { voice: "marin" } } } });
+  });
+
+  it("passes a raw SDP offer through and refuses an empty or oversized one", async () => {
+    const { config, seen } = await setup(async () => new Response("v=0 answer", { status: 201, headers: { "content-type": "application/sdp" } }));
+    const offer = (body: string, headers: Record<string, string> = {}) => at("/v1/realtime", { method: "POST", headers: { authorization: `Bearer ${KEY}`, "content-type": "application/sdp", ...headers }, body });
+    expect((await handle(offer("v=0 offer"), config)).status).toBe(201);
+    expect(await seen[0]?.text()).toBe("v=0 offer");
+    expect(seen[0]?.headers.get("content-type")).toBe("application/sdp");
+    expect((await handle(offer("  "), config)).status).toBe(400);
+    expect((await handle(offer("v=0", { "content-length": String(2 * 1024 * 1024) }), config)).status).toBe(413);
+    expect(seen).toHaveLength(1);
+  });
+});
