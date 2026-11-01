@@ -10,7 +10,7 @@ Two ways to install. Both are free and open source, with the same dashboard; sub
 | Install | Your Cloudflare plan | What runs | Deploy |
 |---|---|---|---|
 | **Container** | Workers Paid<br>($5/month, for Containers) | The latest CPA release<br>in a container | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
-| **Workers&#8209;only** | Workers Free | Our TypeScript port of CPA:<br>any app to any provider | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/worker"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
+| **Workers&#8209;only** | Workers Free | Our TypeScript port of CPA:<br>any app to any provider<br>(see [limits](#limits-of-the-workers-only-install)) | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/worker"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
 
 ## Why
 
