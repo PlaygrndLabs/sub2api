@@ -18,29 +18,34 @@ concurrency:
 
 jobs:
   deploy:
-    # Both installs deploy as the Worker sub2api, so an account on the Container install
-    # (DEPLOY_CONTAINER=true) never gets this one on top.
-    if: vars.DEPLOY_CONTAINER != 'true'
     runs-on: ubuntu-latest
     # The Cloudflare token goes only to the steps that call Cloudflare, never to npm install
     # scripts or the Claude Code check.
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Check Cloudflare credentials
         id: creds
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        # Both installs deploy as the Worker sub2api, so this only ever updates the install that is
+        # already live (scripts/live-install.mjs).
+        # With no Worker yet, it deploys the Workers-only install, as before.
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
             echo "::notice::Skipping deploy: add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID as repository secrets to deploy from GitHub Actions."
             echo "ready=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-      - if: steps.creds.outputs.ready == 'true'
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+          live=$(node scripts/live-install.mjs)
+          if [ "$live" = worker ] || [ "$live" = none ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Skipping deploy: the Worker sub2api is the Container install."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
       - if: steps.creds.outputs.ready == 'true'
         uses: actions/setup-node@v4
         with:

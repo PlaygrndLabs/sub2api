@@ -71,7 +71,7 @@ The management API sits behind both the sign-in cookie and the management key. I
 
 ## Deploying from GitHub
 
-With `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` set as repository secrets (the same ones the Container deploy uses), `.github/workflows/deploy-worker.yml` deploys this Worker whenever `worker/` changes on `main`. Add a gateway API key as the `SUB2API_WORKER_TEST_KEY` secret (the old name `SUB2API_FREE_TEST_KEY` still works) and each deploy also runs Claude Code through the gateway: one short prompt and one long streamed answer. To freeze the dashboard, set the `PANEL_VERSION` and `PANEL_SHA256` repository variables; each build log prints the SHA-256 of the dashboard it downloaded.
+With `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` set as repository secrets (the same ones the Container deploy uses), `.github/workflows/deploy-worker.yml` deploys this Worker whenever `worker/` changes on `main`, unless the account's Worker `sub2api` already runs the Container install. Add a gateway API key as the `SUB2API_WORKER_TEST_KEY` secret (the old name `SUB2API_FREE_TEST_KEY` still works) and each deploy also runs Claude Code through the gateway: one short prompt and one long streamed answer. To freeze the dashboard, set the `PANEL_VERSION` and `PANEL_SHA256` repository variables; each build log prints the SHA-256 of the dashboard it downloaded.
 
 ## Checked live
 
