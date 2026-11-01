@@ -1,0 +1,28 @@
+# Temporary: runs the replace step once from this branch (user approved 2026-11-01). Removed before merge.
+name: tmp move replace
+on:
+  push:
+    branches: [claude/project-thread-5091oo]
+    paths: [".github/workflows/tmp-move.yml"]
+permissions:
+  contents: read
+concurrency:
+  group: deploy-container
+  cancel-in-progress: false
+jobs:
+  replace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Export, then replace the Workers-only install with the Container install
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: sh scripts/move-to-container.sh --replace
