@@ -74,6 +74,7 @@ const COOLDOWN_MESSAGES: Record<string, string> = {
   not_found: "not_found",
   quota: "quota exhausted",
   transient_error: "transient upstream error",
+  "cloudflare challenge": "cloudflare challenge",
 };
 
 function iso(seconds: number): string {

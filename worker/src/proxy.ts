@@ -193,6 +193,24 @@ export function codexRequest(request: Request, accessToken: string, accountId: s
   return new Request(`${CODEX_UPSTREAM}/responses`, { method: "POST", headers, body });
 }
 
+// A 403 page from the upstream's Cloudflare edge rather than its API, which answers in JSON.
+// chatgpt.com sends one for every request a Worker makes: Cloudflare marks Worker requests with a
+// CF-Worker header that a Worker can't remove, and chatgpt.com blocks requests that carry it.
+export function edgeBlocked(upstream: Response): boolean {
+  if (upstream.status !== 403) return false;
+  return upstream.headers.has("cf-mitigated") || (upstream.headers.get("content-type") ?? "").toLowerCase().startsWith("text/html");
+}
+
+// The block page swapped for an OpenAI-style error the client and the translators can read.
+// Other hosts stay unnamed, so a client never learns where a configured provider points.
+export function edgeBlockError(target: string): Response {
+  const chatgpt = URL.canParse(target) && new URL(target).hostname === "chatgpt.com";
+  const message = chatgpt
+    ? "chatgpt.com blocked this request at its Cloudflare edge (HTTP 403 page). chatgpt.com blocks requests sent from Cloudflare Workers, so a ChatGPT login can't serve text models or voice calls on the Workers-only install; the Realtime WebSocket still works. Use an OpenAI API key, or the Container install."
+    : "The upstream blocked this request at its Cloudflare edge (HTTP 403 page), before its API saw it.";
+  return Response.json({ error: { message, type: "permission_error", code: "upstream_edge_blocked" } }, { status: 403, headers: { "cache-control": "no-store" } });
+}
+
 export function downstreamResponse(upstream: Response): Response {
   const headers = new Headers();
   for (const [name, value] of upstream.headers) if (!DROPPED_RESPONSE_HEADERS.has(name)) headers.set(name, value);
