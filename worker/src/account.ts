@@ -178,7 +178,7 @@ export class Account {
     if (this.keyHashes === null) {
       this.keyHashes = new Set(await Promise.all(this.currentConfig().apiKeys().map(hashKey)));
     }
-    // Keys made by the first free release's own dashboard were stored only as hashes.
+    // Keys made by the first Workers-only release's own dashboard were stored only as hashes.
     return this.keyHashes.has(hash) || this.vault.keyExists(hash);
   }
 

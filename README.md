@@ -9,7 +9,7 @@ Two ways to install. Both are free and open source, with the same dashboard; sub
 
 | Install | Your Cloudflare plan | What runs | Deploy |
 |---|---|---|---|
-| **Workers&#8209;only** | Workers Free | Our TypeScript port of CPA:<br>any app to any provider | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
+| **Workers&#8209;only** | Workers Free | Our TypeScript port of CPA:<br>any app to any provider | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/worker"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
 | **Container** | Workers Paid<br>($5/month, for Containers) | The latest CPA release<br>in a container | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
 
 ## Why
@@ -24,7 +24,7 @@ Two ways to install. Both are free and open source, with the same dashboard; sub
 
 You need a Cloudflare account on the [Workers Paid plan](https://developers.cloudflare.com/workers/platform/pricing/) ($5/month; Containers require it).
 
-On the free plan? Use the **Workers-only** button above instead; see [free/README.md](free/README.md).
+On Workers Free? Use the **Workers-only** button above instead; see [worker/README.md](worker/README.md).
 
 1. Press the **Container** install's **Deploy to Cloudflare** button above.
 2. Set the two secrets it asks for. Each needs at least 32 characters of `A-Z a-z 0-9 _ -`; `openssl rand -hex 32` makes one:
@@ -86,7 +86,7 @@ app ──► Worker: CPA port ──► Claude / Codex / Gemini / Vertex / Kimi
           └─► Durable Object (SQLite): logins, config, usage, logs
 ```
 
-See [free/README.md](free/README.md) for what it covers.
+See [worker/README.md](worker/README.md) for what it covers.
 
 ## Update
 

@@ -1,5 +1,5 @@
 // Downloads CPA's official dashboard (Cli-Proxy-API-Management-Center) into public/ before each
-// build. PANEL_VERSION pins a release tag; the default is the latest release, as on the paid install.
+// build. PANEL_VERSION pins a release tag; the default is the latest release, as on the Container install.
 // PANEL_SHA256, when set, must match the download, so a changed upstream file fails the build.
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";

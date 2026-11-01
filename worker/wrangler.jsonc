@@ -1,6 +1,6 @@
 {
   // sub2api for the Workers Free plan: no container, CPA's dashboard and API in TypeScript.
-  // Deploy with: npx wrangler deploy -c free/wrangler.jsonc
+  // Deploy with: npx wrangler deploy -c worker/wrangler.jsonc
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "sub2api",
   "main": "src/index.ts",

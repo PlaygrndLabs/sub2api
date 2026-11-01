@@ -1,7 +1,7 @@
 // Regenerates the built-in copies of CPA's model catalogs from router-for-me/models, where CPA
 // itself refreshes them: src/model-catalog.ts (models.json, trimmed to the fields the model lists
 // use) and src/codex-client-catalog.ts (codex_client_models.json, the Codex CLI's model
-// templates). Run it from free/ with `node scripts/update-catalogs.mjs`, then review the diff.
+// templates). Run it from worker/ with `node scripts/update-catalogs.mjs`, then review the diff.
 import { writeFile } from "node:fs/promises";
 
 const BASE = "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main";

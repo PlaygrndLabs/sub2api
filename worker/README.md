@@ -1,6 +1,6 @@
 # sub2api, Workers-only install
 
-A container-free version of sub2api that runs on Cloudflare's **free** Workers plan. It is a TypeScript rewrite of CPA (CLIProxyAPI), not CPA itself, and serves **CPA's own dashboard** (Cli-Proxy-API-Management-Center) through a port of CPA's v8 management API. So both installs look and work the same in the browser.
+A version of sub2api with no container, for Cloudflare's **Workers Free** plan. It is a TypeScript rewrite of CPA (CLIProxyAPI), not CPA itself, and serves **CPA's own dashboard** (Cli-Proxy-API-Management-Center) through a port of CPA's v8 management API. So both installs look and work the same in the browser.
 
 It covers **Claude, ChatGPT (Codex) and Kimi subscriptions**, **Vertex AI service accounts**, and **API keys** for Claude, Gemini (including Interactions), Vertex AI, Codex, xAI and any OpenAI-compatible provider.
 
@@ -13,30 +13,30 @@ It covers **Claude, ChatGPT (Codex) and Kimi subscriptions**, **Vertex AI servic
 - Any client reaches any provider. A request the provider can't take as sent is translated, following CPA's translators, with thinking, tool calls, images and streaming. Claude Code and Codex CLI requests to their own logins pass through untouched.
 - Claude logins serve Claude Code only: without CPA's cloaking, Anthropic accepts a subscription token from Claude Code alone. Other clients use Claude models through a Claude API key.
 - Model lists as in CPA: `GET /v1/models`, `GET /v1beta/models` and the dashboard's **Available Models** list every model across logins and keys, from CPA's model catalog (refreshed every three hours). The Codex CLI gets its own catalog format (see `model_catalog_url` below).
-- CPA's routing, set in the `routing` config section: `round-robin`, `weighted-round-robin` and `fill-first`, failover to the next login or key, retries, and CPA's cooldowns for rate-limited or failing credentials, honouring the provider's stated reset. **Auth Files** shows each login's cooldowns. A request makes at most 10 upstream attempts within 2 minutes, to stay inside the free plan's limits.
+- CPA's routing, set in the `routing` config section: `round-robin`, `weighted-round-robin` and `fill-first`, failover to the next login or key, retries, and CPA's cooldowns for rate-limited or failing credentials, honouring the provider's stated reset. **Auth Files** shows each login's cooldowns. A request makes at most 10 upstream attempts within 2 minutes, to stay inside Workers Free's limits.
 - Usage and logs as in CPA: success and failure counts per login and key, and with **Logging to file** on, a **Logs** line per API request (the last 2,000), never with request bodies or keys.
-- Everything is stored in one SQLite-backed Durable Object, which the free plan includes.
+- Everything is stored in one SQLite-backed Durable Object, which Workers Free includes.
 
-Claude Code and Codex CLI request bodies are never parsed, so a Worker spends well under 1 ms of its 10 ms CPU budget even on a 600 KB Claude Code request (see the CPU test in `test/app.test.ts`). Requests that need a model rewritten or a body adapted are parsed once. Translated requests cost the most, about 4 to 6 ms for a 600 KB conversation; very long translated conversations can run past the free plan's 10 ms, which the Container install doesn't have.
+Claude Code and Codex CLI request bodies are never parsed, so a Worker spends well under 1 ms of its 10 ms CPU budget even on a 600 KB Claude Code request (see the CPU test in `test/app.test.ts`). Requests that need a model rewritten or a body adapted are parsed once. Translated requests cost the most, about 4 to 6 ms for a 600 KB conversation; very long translated conversations can run past Workers Free's 10 ms, which the Container install doesn't have.
 
 Not included yet: Gemini and other OAuth logins, and CPA's per-request detail logs. Deliberately left out: CPA's request cloaking and TLS fingerprint spoofing. Unlike CPA, Google's default safety filters stay on for Gemini.
 
 ## Try it
 
-You need a Cloudflare account. The free plan is enough.
+You need a Cloudflare account. Workers Free is enough.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/free)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/worker)
 
 Before the first deploy, it asks for `DASHBOARD_PASSWORD` and `MANAGEMENT_KEY`, each at least 16 characters and different from each other, as on the Container install. `openssl rand -hex 24` makes one. Or from a clone:
 
 ```bash
-cd free && npm ci
+cd workers && npm ci
 npx wrangler login
 npx wrangler deploy
 sh ../scripts/set-secrets.sh   # generates both secrets, stores them, prints them once
 ```
 
-The Worker is named `sub2api`, like the Container install, so put only one of the two on an account. Installs made before 2026-10-29 were named `sub2api-free`, and updating one creates a new, empty Worker. To keep your logins and keys, set `"name": "sub2api-free"` in `free/wrangler.jsonc` before you update.
+The Worker is named `sub2api`, like the Container install, so put only one of the two on an account. Installs made before 2026-10-29 were named `sub2api-free`, and updating one creates a new, empty Worker. To keep your logins and keys, set `"name": "sub2api-free"` in `worker/wrangler.jsonc` before you update.
 
 1. Open `https://sub2api.<your-subdomain>.workers.dev` and sign in with the dashboard password.
 2. CPA's dashboard opens and asks for the management key: enter `MANAGEMENT_KEY`.
@@ -64,13 +64,13 @@ model_catalog_url = "https://sub2api.<your-subdomain>.workers.dev/v1/models"
 
 `model_catalog_url` makes the Codex CLI's model picker list every model the gateway serves (Claude, Gemini and the rest, not only ChatGPT's), in the CLI's own catalog format, as CPA answers it. Leave it out to keep the CLI's built-in list.
 
-Keys and the login made with the first free release keep working: the old login is turned into an auth file on first use.
+Keys and the login made with the first Workers-only release keep working: the old login is turned into an auth file on first use.
 
 The management API sits behind both the sign-in cookie and the management key. It stays off until `MANAGEMENT_KEY` is set to at least 16 characters and differs from the dashboard password, because the dashboard keeps the key in browser storage.
 
 ## Deploying from GitHub
 
-With `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` set as repository secrets (the same ones the main deploy uses), `.github/workflows/deploy-free.yml` deploys this Worker whenever `free/` changes on `main`. Add a gateway API key as the `SUB2API_FREE_TEST_KEY` secret and each deploy also runs Claude Code through the gateway: one short prompt and one long streamed answer. To freeze the dashboard, set the `PANEL_VERSION` and `PANEL_SHA256` repository variables; each build log prints the SHA-256 of the dashboard it downloaded.
+With `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` set as repository secrets (the same ones the Container deploy uses), `.github/workflows/deploy-worker.yml` deploys this Worker whenever `worker/` changes on `main`. Add a gateway API key as the `SUB2API_WORKER_TEST_KEY` secret (the old name `SUB2API_FREE_TEST_KEY` still works) and each deploy also runs Claude Code through the gateway: one short prompt and one long streamed answer. To freeze the dashboard, set the `PANEL_VERSION` and `PANEL_SHA256` repository variables; each build log prints the SHA-256 of the dashboard it downloaded.
 
 ## Checked live
 

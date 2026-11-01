@@ -134,7 +134,7 @@ describe("OAuth", () => {
   });
 });
 
-describe("pages the free install doesn't have", () => {
+describe("pages the Workers-only install doesn't have", () => {
   it("answers with empty data instead of errors", async () => {
     const { call } = setup();
     expect(await (await call("GET", "plugins")).json()).toMatchObject({ plugins_enabled: false, plugins: [] });

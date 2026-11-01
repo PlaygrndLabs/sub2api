@@ -69,7 +69,7 @@ export class Vault {
     this.migrateSingleLogin();
   }
 
-  // The first free release kept one Claude login in its own table; it becomes a credential file.
+  // The first Workers-only release kept one Claude login in its own table; it becomes a credential file.
   private migrateSingleLogin(): void {
     const old = this.credential();
     if (old === null) return;
