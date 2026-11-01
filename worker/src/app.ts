@@ -7,6 +7,7 @@ import { chatCompletion, ChatStream, chatToClaude } from "./openai-claude.ts";
 import { geminiResponse, GeminiStream, geminiToClaude } from "./gemini-claude.ts";
 import { kimiUpstreamModel } from "./kimi-oauth.ts";
 import { responsesResponse, ResponsesStream, responsesToClaude } from "./responses-claude.ts";
+import { callBody, callResponse, MAX_CALL_BODY, realtimeCallRequest, realtimeError, realtimeRoute, realtimeSocketRequest, socketModel, LIVE_MODEL, liveModel, type RealtimeRoute } from "./realtime.ts";
 import { codexModelCatalog } from "./codex-models.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
 import { CatalogCache, claudeModelList, geminiModel, geminiModelList, openaiModelList, servedModels } from "./models.ts";
@@ -727,6 +728,75 @@ async function served(request: Request, url: URL, route: Route, config: AppConfi
   return proxied(request, url, route as Route & { format: Format }, config, trace);
 }
 
+// OpenAI Realtime (voice) through a ChatGPT login, logged like any other API call.
+async function realtime(request: Request, url: URL, kind: RealtimeRoute, config: AppConfig): Promise<Response> {
+  const started = Date.now();
+  const trace: Trace = { attempts: [], provider: "", model: "" };
+  const response = await realtimeServed(request, url, kind, config, trace);
+  const line = requestLine({ at: started, requestId: requestId(), status: response.status, ms: Date.now() - started, ip: request.headers.get("cf-connecting-ip") ?? "", method: request.method, path: url.pathname, provider: trace.provider, model: trace.model });
+  remember(config, { at: started, line, attempts: trace.attempts });
+  return response;
+}
+
+async function realtimeServed(request: Request, url: URL, kind: RealtimeRoute, config: AppConfig, trace: Trace): Promise<Response> {
+  const key = presentedKey(request, url);
+  if (key === null || !(await keyValid(key, config))) {
+    return realtimeError(401, "Invalid API key. Add one under API Keys in the gateway dashboard.", "authentication_error", "invalid_api_key");
+  }
+  if (kind === "unsupported") {
+    return realtimeError(501, "This Realtime endpoint isn't served on the Workers-only install yet. Connect a WebSocket to /v1/realtime, or send a WebRTC offer to /v1/realtime/calls.", "not_supported_error", "realtime_capability_not_supported");
+  }
+  const socket = kind === "socket";
+  if (socket && request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    const response = realtimeError(426, "WebSocket upgrade required", "invalid_request_error", "websocket_upgrade_required");
+    response.headers.set("upgrade", "websocket");
+    return response;
+  }
+  let call: { body: string; contentType: string; model: string } | null = null;
+  if (!socket) {
+    const length = Number(request.headers.get("content-length") ?? "0");
+    if (Number.isFinite(length) && length > MAX_CALL_BODY) return realtimeError(413, "Request body too large.", "invalid_request_error", "realtime_request_failed");
+    const prepared = await callBody(request);
+    if (typeof prepared === "string") return realtimeError(400, prepared, "invalid_request_error", "realtime_request_failed");
+    call = prepared;
+  }
+  const model = socket ? socketModel(url) : (call?.model ?? LIVE_MODEL);
+  trace.provider = "codex";
+  trace.model = socket ? liveModel(model) : model;
+  const token = await loginToken(config, "codex", "");
+  if (!("value" in token)) return realtimeError(token.status, `Voice needs a ChatGPT login. ${token.message}`, "server_error", "codex_auth_unavailable");
+  const upstreamRequest = call === null ? realtimeSocketRequest(request, model, token.value, token.accountId) : realtimeCallRequest(request, call.body, call.contentType, token.value, token.accountId);
+  const upstream = await config.upstream(upstreamRequest).catch(() => null);
+  const attempt = (ok: boolean) => {
+    if (token.name !== "") trace.attempts.push({ key: loginKey(token.name), ok });
+  };
+  if (upstream === null) {
+    attempt(false);
+    return realtimeError(502, "OpenAI Realtime couldn't be reached.", "api_error", "realtime_upstream_unavailable");
+  }
+  if (upstream.status === 401) await refused(config, "codex", "", token.value);
+  if (socket && upstream.status === 101 && upstream.webSocket !== null) {
+    attempt(true);
+    // The runtime joins the two sockets itself, so frames cost the Worker no CPU time.
+    return new Response(null, { status: 101, webSocket: upstream.webSocket, headers: socketHeaders(upstream.headers) });
+  }
+  attempt(upstream.ok);
+  if (socket) {
+    const message = upstream.status === 404 || upstream.status === 501 ? "Direct Realtime WebSocket is not supported by the ChatGPT login upstream" : await upstreamMessage(upstream);
+    const type = upstream.status === 401 ? "authentication_error" : "api_error";
+    return realtimeError(upstream.status === 404 ? 501 : upstream.status, message, type, upstream.status === 401 ? "realtime_upstream_unauthorized" : "realtime_websocket_upstream_unavailable");
+  }
+  return callResponse(upstream);
+}
+
+// Only the subprotocol OpenAI chose goes back on the handshake.
+function socketHeaders(source: Headers): Headers {
+  const headers = new Headers();
+  const protocol = source.get("sec-websocket-protocol");
+  if (protocol !== null) headers.set("sec-websocket-protocol", protocol);
+  return headers;
+}
+
 async function signedIn(request: Request, config: AppConfig): Promise<boolean> {
   if (config.dashboardPassword.length < MIN_PASSWORD_LENGTH) return false;
   const token = readCookie(request.headers.get("cookie"), SESSION_COOKIE);
@@ -820,6 +890,8 @@ export async function handle(request: Request, config: AppConfig): Promise<Respo
   const url = new URL(request.url);
   const route = routeOf(url.pathname);
   if (route !== null) return api(request, url, route, config);
+  const live = realtimeRoute(request.method, url.pathname, url.searchParams);
+  if (live !== null) return realtime(request, url, live, config);
   if (url.pathname.startsWith(`${MANAGEMENT_PREFIX}/`) || url.pathname === MANAGEMENT_PREFIX || url.pathname === "/v0/management/config") {
     return management(request, url, config);
   }
