@@ -88,6 +88,15 @@ app ──► Worker: CPA port ──► Claude / Codex / Gemini / Vertex / Kimi
 
 See [worker/README.md](worker/README.md) for what it covers.
 
+## Limits of the Workers-only install
+
+- ChatGPT (Codex) logins can't serve text requests, WebRTC voice calls or quota checks. Use a ChatGPT login on the Container install, or a Codex API key.
+- Claude logins serve Claude Code only. Other apps reach Claude through a Claude API key.
+- Logins for Claude, ChatGPT and Kimi only, plus Vertex service accounts. No per-request detail logs, and no Realtime client secrets, sideband sockets, SIP or translations.
+- Workers Free allows 100,000 requests a day and 10 ms of CPU per request. Very long translated conversations can run past it, and a request makes at most 10 upstream attempts.
+
+Moving to Workers Paid? `sh scripts/move-to-container.sh` copies your logins, API keys and config into the Container install's R2 bucket and keeps a backup there. Add `--replace` to then swap the Worker for the Container install.
+
 ## Update
 
 A Deploy-button copy redeploys whenever its `main` branch changes. To get the latest release:
