@@ -13,7 +13,7 @@ import { MANAGEMENT_PREFIX } from "./management.ts";
 import { CatalogCache, claudeModelList, geminiModel, geminiModelList, openaiModelList, servedModels } from "./models.ts";
 import { loginPage, messagePage } from "./pages.ts";
 import { candidates, inDefaultFamily, NATIVE_FORMAT, splitModel, takesNatively, type Candidate, type Format, type LoginEntry, type RoutingTable } from "./providers.ts";
-import { CODEX_UPSTREAM, codexRequest, downstreamResponse, formatError, presentedKey, providerRequest, routeOf, upstreamRequest, UPSTREAM, type Route } from "./proxy.ts";
+import { CODEX_UPSTREAM, codexRequest, downstreamResponse, edgeBlocked, edgeBlockError, formatError, presentedKey, providerRequest, routeOf, upstreamRequest, UPSTREAM, type Route } from "./proxy.ts";
 import { CooldownBook, retryHint, route as routed, type CooldownEvent } from "./routing.ts";
 import { apiKeyKey, loginKey, requestLine, type Attempt, type UsageRecord } from "./usage.ts";
 import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "./session.ts";
@@ -608,10 +608,16 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
     attempt: async (candidate) => {
       // The upstream's own answer carries the wait hint, whatever shape the client gets back.
       let hint: Promise<number | null> = Promise.resolve(null);
+      let blocked = false;
       const watched: AppConfig = {
         ...config,
         upstream: async (upstreamRequest) => {
           const upstream = await config.upstream(upstreamRequest);
+          if (edgeBlocked(upstream)) {
+            blocked = true;
+            await upstream.body?.cancel().catch(() => undefined);
+            return edgeBlockError(upstreamRequest.url);
+          }
           if (upstream.status === 429 || upstream.status === 404 || upstream.status >= 500) {
             const small = Number(upstream.headers.get("content-length") ?? "0") <= HINT_BODY_LIMIT;
             const body = upstream.status === 429 && small ? upstream.clone().text().catch(() => "") : Promise.resolve("");
@@ -622,7 +628,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
       };
       const response = await serveWith(candidate, watched);
       noteAttempt(trace, config, candidate, response.status);
-      return { response, hint: response.ok ? null : await hint };
+      return { response, hint: response.ok ? null : await hint, blocked };
     },
     report: (event) => share(config, event),
     cooling: (seconds) => {
@@ -773,6 +779,11 @@ async function realtimeServed(request: Request, url: URL, kind: RealtimeRoute, c
   if (upstream === null) {
     attempt(false);
     return realtimeError(502, "OpenAI Realtime couldn't be reached.", "api_error", "realtime_upstream_unavailable");
+  }
+  if (edgeBlocked(upstream)) {
+    attempt(false);
+    await upstream.body?.cancel().catch(() => undefined);
+    return edgeBlockError(upstreamRequest.url);
   }
   if (upstream.status === 401) await refused(config, "codex", "", token.value);
   if (socket && upstream.status === 101 && upstream.webSocket !== null) {

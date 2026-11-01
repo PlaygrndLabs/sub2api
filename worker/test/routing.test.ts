@@ -32,6 +32,11 @@ describe("cooldowns", () => {
     expect(after(401, { ...claudeKey, login: true })).toMatchObject({ model: "", until: NOW + 60 });
     expect(after(402)).toMatchObject({ model: "", until: NOW + 1800, reason: "payment_required" });
     expect(after(403)).toMatchObject({ model: "", until: NOW + 1800, reason: "payment_required" });
+    const blocked = (previous: Cooldown | null) => cooldownAfter("k", "m", key, { status: 403, hint: null, blocked: true }, () => previous, DEFAULT_ROUTING, NOW);
+    expect(blocked(null)).toMatchObject({ model: "", until: NOW + 10, reason: "cloudflare challenge", level: 1 });
+    expect(blocked({ id: "k", model: "", until: NOW - 1, reason: "cloudflare challenge", status: 403, level: 5 })).toMatchObject({ until: NOW + 32, level: 6 });
+    expect(blocked({ id: "k", model: "", until: NOW + 7, reason: "cloudflare challenge", status: 403, level: 5 })).toMatchObject({ until: NOW + 7, level: 5 });
+    expect(blocked({ id: "k", model: "", until: NOW - 1, reason: "cloudflare challenge", status: 403, level: 11 })).toMatchObject({ until: NOW + 1800, level: 11 });
     expect(after(404)).toMatchObject({ model: "m", until: NOW + 12 * 3600, reason: "not_found" });
     expect(after(503)).toMatchObject({ model: "m", until: NOW + 60, reason: "transient_error" });
     expect(after(503, key, null, null, { ...DEFAULT_ROUTING, transientCooldownSeconds: 5 })).toMatchObject({ until: NOW + 5 });

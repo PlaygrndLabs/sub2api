@@ -39,7 +39,8 @@ export interface Cooldown {
   readonly id: string;
   readonly model: string;
   readonly until: number;
-  // CPA's reason codes: unauthorized, payment_required, not_found, quota, transient_error.
+  // CPA's reason codes: unauthorized, payment_required, not_found, quota, transient_error,
+  // cloudflare challenge.
   readonly reason: string;
   readonly status: number;
   // Steps up the quota backoff (1 s, 2 s, 4 s ... 30 min) until the credential succeeds again.
@@ -56,6 +57,7 @@ const NOT_FOUND_COOLDOWN = 12 * HOUR;
 const TRANSIENT_COOLDOWN = MINUTE;
 const QUOTA_MAX = 30 * MINUTE;
 const QUOTA_FLOOR = 10;
+const CHALLENGE = "cloudflare challenge";
 const TRANSIENT_STATUSES = new Set([408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 529]);
 // After these, the next credential is tried in the same round.
 const FAILOVER_STATUSES = new Set([401, 402, 403, 404, 429, ...TRANSIENT_STATUSES]);
@@ -153,6 +155,8 @@ export interface Failure {
   readonly status: number;
   // Seconds the upstream asked to wait, if it said.
   readonly hint: number | null;
+  // The upstream's Cloudflare edge refused the request with a block page, not its API.
+  readonly blocked?: boolean;
 }
 
 interface Cooled {
@@ -171,6 +175,16 @@ export function cooldownAfter(id: string, model: string, cooled: Cooled, failure
     seconds > 0 ? { id, model: scope === "credential" ? "" : model, until: now + seconds, reason, status, level } : null;
   // A login's token is refreshed after a 401, so it is only rested like a transient error.
   if (status === 401) return cooled.login ? make("credential", transient, "unauthorized") : make("credential", AUTH_COOLDOWN, "unauthorized");
+  // A block page says nothing about the account, so it backs off like a quota (10 s floor), as CPA's
+  // Cloudflare challenge does, and never takes the 30 min payment_required rest.
+  if (failure.blocked === true) {
+    const last = recorded("");
+    const previous = last?.reason === CHALLENGE ? last : null;
+    const level = previous?.level ?? 0;
+    if (previous !== null && previous.until > now) return make("credential", previous.until - now, CHALLENGE, level);
+    const seconds = Math.min(QUOTA_MAX, Math.max(QUOTA_FLOOR, 2 ** level));
+    return make("credential", seconds, CHALLENGE, seconds >= QUOTA_MAX ? level : level + 1);
+  }
   if (status === 402 || status === 403) return make("credential", AUTH_COOLDOWN, "payment_required");
   if (status === 404) return make("model", hint !== null && hint > 0 ? hint : NOT_FOUND_COOLDOWN, "not_found");
   if (status === 429) {
@@ -252,6 +266,8 @@ export interface Attempted {
   readonly response: Response;
   // Seconds the upstream asked to wait, read from the upstream's own answer.
   readonly hint: number | null;
+  // The upstream's edge answered with a block page.
+  readonly blocked?: boolean;
 }
 
 export interface RouteOptions {
@@ -302,28 +318,29 @@ export async function route(options: RouteOptions): Promise<Response> {
     let list = ordered(open, options.turn + round, settings.strategy);
     if (list.length === 0) list = open;
     if (settings.maxRetryCredentials > 0) list = list.slice(0, settings.maxRetryCredentials);
-    let status = 0;
+    let roundable = false;
     for (const candidate of list) {
       if (budget === 0) break;
       budget -= 1;
-      const { response, hint } = await options.attempt(candidate);
-      status = response.status;
+      const { response, hint, blocked } = await options.attempt(candidate);
+      // A block page won't lift within a request, so it never starts another round.
+      roundable = blocked !== true && ROUND_STATUSES.has(response.status);
       const id = candidate.credential.id;
-      if (status < 400) {
+      if (response.status < 400) {
         if (book.succeed(table, id)) options.report({ id, clear: true });
         return response;
       }
-      if (!FAILOVER_STATUSES.has(status)) return response;
+      if (!FAILOVER_STATUSES.has(response.status)) return response;
       const now = options.nowSeconds();
       const cooled = { kind: candidate.credential.kind, login: options.isLogin(candidate), disableCooling: candidate.credential.disableCooling ?? settings.disableCooling };
-      const cooldown = cooldownAfter(id, candidate.model, cooled, { status, hint }, (model) => book.find(table, id, model), settings, now);
+      const cooldown = cooldownAfter(id, candidate.model, cooled, { status: response.status, hint, blocked: blocked === true }, (model) => book.find(table, id, model), settings, now);
       if (cooldown !== null) {
         book.note(cooldown, now);
         options.report(cooldown);
       }
       last = await kept(response);
     }
-    if (!ROUND_STATUSES.has(status)) break;
+    if (!roundable) break;
   }
   return last ?? options.cooling(0);
 }
