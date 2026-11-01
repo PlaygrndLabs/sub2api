@@ -1,4 +1,4 @@
-name: deploy
+name: deploy container
 
 on:
   workflow_run:
@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy
+  group: deploy-container
   cancel-in-progress: false
 
 jobs:

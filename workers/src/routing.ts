@@ -29,7 +29,7 @@ export const DEFAULT_ROUTING: RoutingSettings = {
 };
 
 // Upstream calls one request may make in all, well inside the 50 subrequests a Worker gets on
-// the Free plan (the Durable Object and token calls count too).
+// Workers Free (the Durable Object and token calls count too).
 export const MAX_ATTEMPTS = 10;
 // Rounds wait at most this long in all, whatever max-retry-interval says.
 const MAX_TOTAL_WAIT_SECONDS = 120;

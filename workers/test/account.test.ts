@@ -157,7 +157,7 @@ describe("access token", () => {
   });
 });
 
-describe("migration from the first free release", () => {
+describe("migration from the first Workers-only release", () => {
   it("turns the single stored login into a credential file", () => {
     const sql = memorySql();
     new Vault(sql).saveCredential({ accessToken: "at", refreshToken: "rt", expiresAt: NOW + 100, email: "me@example.com" });

@@ -772,7 +772,7 @@ function withoutCookies(request: Request, target?: URL): Request {
   return new Request(target ?? request.url, new Request(request, { headers }));
 }
 
-// As on the container install, the management key is its own secret: the dashboard keeps it in
+// As on the Container install, the management key is its own secret: the dashboard keeps it in
 // browser storage, so it must never be the sign-in password.
 const MANAGEMENT_KEY_NOT_SET = `The management API is off: set the MANAGEMENT_KEY secret to at least ${MIN_MANAGEMENT_KEY_LENGTH} characters, different from DASHBOARD_PASSWORD.`;
 
