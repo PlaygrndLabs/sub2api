@@ -7,7 +7,9 @@ export const REALTIME_UPSTREAM = "https://api.openai.com/v1/realtime";
 export const CODEX_CALLS_UPSTREAM = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas";
 // The model ChatGPT logins serve voice with; CPA maps every gpt-realtime model to it.
 export const LIVE_MODEL = "gpt-live-1-codex";
-const DEFAULT_SOCKET_MODEL = "gpt-realtime";
+// The voice model clients ask for; /v1/models lists it when a ChatGPT login is connected.
+export const REALTIME_MODEL = "gpt-realtime";
+const DEFAULT_SOCKET_MODEL = REALTIME_MODEL;
 // What CPA sends on a Realtime WebSocket when the client doesn't say who it is.
 const SOCKET_ORIGINATOR = "Codex Desktop";
 // SDP offers are a few kilobytes.

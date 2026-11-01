@@ -7,7 +7,7 @@ import { chatCompletion, ChatStream, chatToClaude } from "./openai-claude.ts";
 import { geminiResponse, GeminiStream, geminiToClaude } from "./gemini-claude.ts";
 import { kimiUpstreamModel } from "./kimi-oauth.ts";
 import { responsesResponse, ResponsesStream, responsesToClaude } from "./responses-claude.ts";
-import { callBody, callResponse, MAX_CALL_BODY, realtimeCallRequest, realtimeError, realtimeRoute, realtimeSocketRequest, socketModel, LIVE_MODEL, liveModel, type RealtimeRoute } from "./realtime.ts";
+import { callBody, callResponse, MAX_CALL_BODY, REALTIME_MODEL, realtimeCallRequest, realtimeError, realtimeRoute, realtimeSocketRequest, socketModel, LIVE_MODEL, liveModel, type RealtimeRoute } from "./realtime.ts";
 import { codexModelCatalog } from "./codex-models.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
 import { CatalogCache, claudeModelList, geminiModel, geminiModelList, openaiModelList, servedModels } from "./models.ts";
@@ -653,7 +653,11 @@ async function modelList(request: Request, url: URL, route: Route, config: AppCo
   if (url.pathname === "/v1beta/models") return Response.json(geminiModelList(models), { headers });
   // Anthropic SDKs and Claude Code get Anthropic's shape, as in CPA; everyone else OpenAI's.
   const anthropic = request.headers.has("anthropic-version") || (request.headers.get("user-agent") ?? "").startsWith("claude-cli");
-  return Response.json(anthropic ? claudeModelList(models) : openaiModelList(models), { headers });
+  if (anthropic) return Response.json(claudeModelList(models), { headers });
+  // OpenAI clients also see the Realtime voice model a ChatGPT login serves at /v1/realtime, so
+  // they can find it. It isn't a chat model, so the Codex CLI, Claude and Gemini lists leave it out.
+  const voice = table.codexOAuth && !models.some((model) => model.id === REALTIME_MODEL) ? [{ id: REALTIME_MODEL, created: config.nowSeconds(), owned_by: "openai" }] : [];
+  return Response.json(openaiModelList([...models, ...voice]), { headers });
 }
 
 // Sends the isolate's usage records and cooldowns to the Durable Object, a few seconds after the

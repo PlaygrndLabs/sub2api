@@ -355,12 +355,14 @@ describe("API-key providers", () => {
     expect(ids).not.toContain("gemini-2.5-pro");
     expect(new Set(ids).size).toBe(ids.length);
     expect(openai.data.find((model) => model.id === "kimi")).toMatchObject({ object: "model", owned_by: "router" });
+    // The ChatGPT login's Realtime voice model is listed for OpenAI clients only.
+    expect(openai.data.find((model) => model.id === "gpt-realtime")).toMatchObject({ object: "model", owned_by: "openai" });
     // The catalog refresh runs after the response, and a failed one keeps the embedded catalog.
     await settle();
     expect(seen.map((request) => request.url)).toEqual(["https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json"]);
 
     const claude = (await (await handle(at("/v1/models", { headers: { "x-api-key": KEY, "anthropic-version": "2023-06-01" } }), config)).json()) as { data: { id: string; display_name: string; type: string; max_tokens: number }[]; first_id: string; has_more: boolean };
-    expect(claude.data.map((model) => model.id).sort()).toEqual([...ids].sort());
+    expect(claude.data.map((model) => model.id).sort()).toEqual(ids.filter((id) => id !== "gpt-realtime").sort());
     expect(claude.has_more).toBe(false);
     expect(claude.first_id).toBe(claude.data[0]?.id);
     const names = claude.data.map((model) => model.display_name);
@@ -368,7 +370,7 @@ describe("API-key providers", () => {
     expect(claude.data.find((model) => model.id === "kimi")).toMatchObject({ type: "model", display_name: "kimi", max_tokens: 64000 });
 
     const gemini = (await (await handle(at(`/v1beta/models?key=${KEY}`), config)).json()) as { models: { name: string; supportedGenerationMethods: string[] }[] };
-    expect(gemini.models).toHaveLength(ids.length);
+    expect(gemini.models).toHaveLength(ids.length - 1);
     expect(gemini.models.find((model) => model.name === "models/kimi")?.supportedGenerationMethods).toEqual(["generateContent"]);
     const one = await handle(at(`/v1beta/models/gemini-2.5-flash?key=${KEY}`), config);
     expect(await one.json()).toMatchObject({ name: "models/gemini-2.5-flash", displayName: "Gemini 2.5 Flash", inputTokenLimit: 1048576 });
@@ -389,6 +391,7 @@ describe("API-key providers", () => {
     const slugs = body.models.map((model) => model.slug);
     expect(slugs).toEqual(expect.arrayContaining(["gpt-6-astra", "claude-sonnet-4-6", "work/claude-sonnet-4-6", "kimi", "gemini-2.5-flash"]));
     expect(body.models.find((model) => model.slug === "gpt-6-astra")?.base_instructions.length).toBeGreaterThan(10_000);
+    expect(slugs).not.toContain("gpt-realtime");
     expect((await handle(at("/v1/models?client_version=0.157.0"), config)).status).toBe(401);
   });
 
