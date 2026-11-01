@@ -1,0 +1,36 @@
+# Temporary: runs the check step once from this branch (user asked 2026-11-01). Removed before merge.
+name: tmp move check
+on:
+  push:
+    branches: [claude/project-thread-5091oo]
+    paths: [".github/workflows/tmp-move.yml"]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Check the gateway
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          root=$(pwd)
+          work=$(mktemp -d)
+          config=$(cd "$work" && "$root/node_modules/.bin/wrangler" r2 object get sub2api/config/config.yaml --remote --pipe 2>/dev/null) \
+            || { echo "No config/config.yaml in the sub2api bucket yet: has the Container install started?"; exit 1; }
+          key=$(printf '%s' "$config" | node --input-type=module -e "import { parse } from 'yaml'; let t=''; for await (const c of process.stdin) t+=c; process.stdout.write(String(parse(t)?.access?.['api-keys']?.[0] ?? ''))")
+          [ -n "$key" ] || { echo "The config has no gateway API key."; exit 1; }
+          echo "::add-mask::$key"
+          subdomain=$(node -e "fetch('https://api.cloudflare.com/client/v4/accounts/'+process.env.CLOUDFLARE_ACCOUNT_ID+'/workers/subdomain',{headers:{authorization:'Bearer '+process.env.CLOUDFLARE_API_TOKEN}}).then(r=>r.json()).then(j=>process.stdout.write(j.result?.subdomain??''))")
+          [ -n "$subdomain" ] || { echo "Could not read the account's workers.dev subdomain."; exit 1; }
+          unset CLOUDFLARE_API_TOKEN
+          SUB2API_URL="https://sub2api.$subdomain.workers.dev" SUB2API_KEY="$key" node scripts/check-gateway.mjs
