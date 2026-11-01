@@ -155,7 +155,7 @@ export interface Failure {
   readonly status: number;
   // Seconds the upstream asked to wait, if it said.
   readonly hint: number | null;
-  // The upstream's Cloudflare edge refused the request with a block page, not its API.
+  // The upstream refused the request with an HTML page, not its API.
   readonly blocked?: boolean;
 }
 
@@ -175,8 +175,8 @@ export function cooldownAfter(id: string, model: string, cooled: Cooled, failure
     seconds > 0 ? { id, model: scope === "credential" ? "" : model, until: now + seconds, reason, status, level } : null;
   // A login's token is refreshed after a 401, so it is only rested like a transient error.
   if (status === 401) return cooled.login ? make("credential", transient, "unauthorized") : make("credential", AUTH_COOLDOWN, "unauthorized");
-  // A block page says nothing about the account, so it backs off like a quota (10 s floor), as CPA's
-  // Cloudflare challenge does, and never takes the 30 min payment_required rest.
+  // An HTML page says nothing about the account, so it backs off like a quota (10 s floor), as CPA's
+  // cloudflare challenge does, and never takes the 30 min payment_required rest.
   if (failure.blocked === true) {
     const last = recorded("");
     const previous = last?.reason === CHALLENGE ? last : null;
@@ -266,7 +266,7 @@ export interface Attempted {
   readonly response: Response;
   // Seconds the upstream asked to wait, read from the upstream's own answer.
   readonly hint: number | null;
-  // The upstream's edge answered with a block page.
+  // The upstream answered with an HTML 403 page.
   readonly blocked?: boolean;
 }
 
@@ -323,7 +323,7 @@ export async function route(options: RouteOptions): Promise<Response> {
       if (budget === 0) break;
       budget -= 1;
       const { response, hint, blocked } = await options.attempt(candidate);
-      // A block page won't lift within a request, so it never starts another round.
+      // An HTML 403 won't change within a request, so it never starts another round.
       roundable = blocked !== true && ROUND_STATUSES.has(response.status);
       const id = candidate.credential.id;
       if (response.status < 400) {
