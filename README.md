@@ -95,7 +95,7 @@ See [worker/README.md](worker/README.md) for what it covers.
 - Logins for Claude, ChatGPT and Kimi only, plus Vertex service accounts. No per-request detail logs, and no Realtime client secrets, sideband sockets, SIP or translations.
 - Workers Free allows 100,000 requests a day and 10 ms of CPU per request. Very long translated conversations can run past it, and a request makes at most 10 upstream attempts.
 
-Moving to Workers Paid? `sh scripts/move-to-container.sh` copies your logins, API keys and config into the Container install's R2 bucket and keeps a backup there. Add `--replace` to then swap the Worker for the Container install.
+Moving to Workers Paid? `sh scripts/move-to-container.sh`, or the **move to container** workflow, copies your logins, API keys and config into the Container install's R2 bucket and keeps a backup there. Add `--replace` (the workflow's `replace` step) to then swap the Worker for the Container install.
 
 ## Update
 
