@@ -24,6 +24,7 @@
     "src",
     "worker/src",
     "worker/test",
+    "scripts/move-to-container",
     "test",
     "vitest.config.ts",
     "eslint.config.js"

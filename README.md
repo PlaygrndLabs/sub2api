@@ -9,8 +9,8 @@ Two ways to install. Both are free and open source, with the same dashboard; sub
 
 | Install | Your Cloudflare plan | What runs | Deploy |
 |---|---|---|---|
-| **Workers&#8209;only** | Workers Free | Our TypeScript port of CPA:<br>any app to any provider | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/worker"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
 | **Container** | Workers Paid<br>($5/month, for Containers) | The latest CPA release<br>in a container | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
+| **Workers&#8209;only** | Workers Free | Our TypeScript port of CPA:<br>any app to any provider<br>(see [limits](#limits-of-the-workers-only-install)) | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/worker"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
 
 ## Why
 
@@ -87,6 +87,32 @@ app ──► Worker: CPA port ──► Claude / Codex / Gemini / Vertex / Kimi
 ```
 
 See [worker/README.md](worker/README.md) for what it covers.
+
+## Limits of the Workers-only install
+
+The Workers-only install is a smaller rewrite of CPA that fits the free plan. If you need anything marked **No**, use the Container install.
+
+| Feature | Container | Workers&#8209;only |
+|---|---|---|
+| ChatGPT (Codex) login: text and code | Yes | **No** (use a Codex API key) |
+| ChatGPT login: voice | WebSocket and WebRTC | WebSocket only, not yet tested live |
+| ChatGPT login: quota in the dashboard | Yes | **No** |
+| Claude login | Any app | Claude Code only (other apps need a Claude API key) |
+| Logins | Every CPA provider | Claude, ChatGPT, Kimi, and Vertex service accounts |
+| Images, video, speech (`/v1/images`, `/v1/videos`, `/v1/audio/speech`) | Yes | **No** |
+| Responses WebSocket, `/v1/responses/compact`, legacy `/v1/completions` | Yes | **No** |
+| Realtime client secrets, sideband, SIP, translations | Yes | **No** |
+| Request logs | Full detail | Last 2,000 lines, no request detail |
+| Gemini safety filters | Off, as in CPA | Google's defaults |
+
+Workers Free also caps every account ([Workers](https://developers.cloudflare.com/workers/platform/limits/), [Durable Objects](https://developers.cloudflare.com/durable-objects/platform/pricing/)). Past a cap, calls fail until 00:00 UTC:
+
+- **100,000 requests a day**, for the Worker and for its Durable Object. Each API call uses both.
+- **10 ms of CPU per request.** Claude Code and Codex CLI calls use under 1 ms, but a very long conversation translated between formats can run out and fail.
+- **50 outgoing requests per request**, so a call tries at most 10 logins or keys before it gives up.
+- **5 GB of storage** in total.
+
+Moving to Workers Paid? `sh scripts/move-to-container.sh`, or the **move to container** workflow, copies your logins, API keys and config into the Container install's R2 bucket and keeps a backup there. Add `--replace` (the workflow's `replace` step) to then swap the Worker for the Container install.
 
 ## Update
 

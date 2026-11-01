@@ -18,6 +18,9 @@ concurrency:
 
 jobs:
   deploy:
+    # Both installs deploy as the Worker sub2api, so an account on the Container install
+    # (DEPLOY_CONTAINER=true) never gets this one on top.
+    if: vars.DEPLOY_CONTAINER != 'true'
     runs-on: ubuntu-latest
     # The Cloudflare token goes only to the steps that call Cloudflare, never to npm install
     # scripts or the Claude Code check.
