@@ -1151,7 +1151,7 @@ describe("routing across logins and keys", () => {
     expect(config.cache.cooldowns.find(backend.table, "file:one.json", "")).toMatchObject({ until: NOW + 3600, reason: "quota" });
   });
 
-  it("turns chatgpt.com's Cloudflare block page into a clear error and a short cooldown, without another round", async () => {
+  it("turns a 403 HTML page into a JSON error and a short cooldown, without another round", async () => {
     const page = '<html><body>Unable to load site. If you are using a VPN, try turning it off. Ray ID: x</body></html>';
     const naps: number[] = [];
     const { config, backend, seen, settle } = await loginsSetup(async () => new Response(page, { status: 403, headers: { "content-type": "text/html; charset=UTF-8" } }), [login("one.json", "codex")], {
@@ -1162,7 +1162,7 @@ describe("routing across logins and keys", () => {
     expect(response.status).toBe(403);
     const body = (await response.json()) as { error: { message: string; code: string } };
     expect(body.error.code).toBe("upstream_edge_blocked");
-    expect(body.error.message).toContain("blocks requests sent from Cloudflare Workers");
+    expect(body.error.message).toBe("The upstream refused this request with an HTTP 403 page.");
     expect(JSON.stringify(body)).not.toContain("<html>");
     expect(seen).toHaveLength(1);
     expect(naps).toEqual([]);
@@ -1170,12 +1170,12 @@ describe("routing across logins and keys", () => {
     expect(backend.cooled).toEqual([{ id: "file:one.json", model: "", until: NOW + 10, reason: "cloudflare challenge", status: 403, level: 1 }]);
   });
 
-  it("passes a Claude client the block page's explanation, not the page", async () => {
+  it("passes a Claude client a JSON error, not the HTML page", async () => {
     const { config, backend } = await loginsSetup(async () => new Response("<html>blocked</html>", { status: 403, headers: { "content-type": "text/html" } }), [login("one.json", "codex")]);
     backend.table = { ...backend.table, claudeOAuth: false, codexOAuth: true };
     const response = await handle(post("/v1/messages", { model: "gpt-5.5", max_tokens: 8, messages: [{ role: "user", content: "hi" }] }), config);
     expect(response.status).toBe(403);
-    expect(JSON.stringify(await response.json())).toContain("blocks requests sent from Cloudflare Workers");
+    expect(JSON.stringify(await response.json())).toContain("The upstream refused this request with an HTTP 403 page.");
   });
 
   it("forgets this isolate's cooldowns after a dashboard change, such as a cooldown reset", async () => {
@@ -1410,7 +1410,7 @@ describe("Realtime voice on ChatGPT logins", () => {
     expect(await upstream?.json()).toEqual({ sdp: "v=0 offer", session: { type: "realtime", model: "gpt-live-1-codex", audio: { output: { voice: "marin" } } } });
   });
 
-  it("explains chatgpt.com's Cloudflare block page on a WebRTC offer", async () => {
+  it("turns a 403 HTML page into a JSON error on a WebRTC offer", async () => {
     const { config } = await setup(async () => new Response("<html>Unable to load site</html>", { status: 403, headers: { "content-type": "text/html" } }));
     const response = await handle(at("/v1/realtime/calls", { method: "POST", headers: { authorization: `Bearer ${KEY}`, "content-type": "application/sdp" }, body: "v=0 offer" }), config);
     expect(response.status).toBe(403);

@@ -616,7 +616,7 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
           if (edgeBlocked(upstream)) {
             blocked = true;
             await upstream.body?.cancel().catch(() => undefined);
-            return edgeBlockError(upstreamRequest.url);
+            return edgeBlockError();
           }
           if (upstream.status === 429 || upstream.status === 404 || upstream.status >= 500) {
             const small = Number(upstream.headers.get("content-length") ?? "0") <= HINT_BODY_LIMIT;
@@ -783,7 +783,7 @@ async function realtimeServed(request: Request, url: URL, kind: RealtimeRoute, c
   if (edgeBlocked(upstream)) {
     attempt(false);
     await upstream.body?.cancel().catch(() => undefined);
-    return edgeBlockError(upstreamRequest.url);
+    return edgeBlockError();
   }
   if (upstream.status === 401) await refused(config, "codex", "", token.value);
   if (socket && upstream.status === 101 && upstream.webSocket !== null) {
