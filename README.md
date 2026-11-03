@@ -94,10 +94,10 @@ The Workers-only install is a smaller rewrite of CPA that fits the free plan. If
 
 | Feature | Container | Workers&#8209;only |
 |---|---|---|
-| ChatGPT (Codex) login: text and code | Yes | **No** (use a Codex API key) |
-| ChatGPT login: voice | WebSocket and WebRTC | WebSocket only, not yet tested live |
+| ChatGPT (Codex) login: text and code | Yes | **No**: chatgpt.com blocks Workers with HTTP 403 (use a Codex API key) |
+| ChatGPT login: voice | WebSocket and WebRTC | WebSocket only (WebRTC gets the same 403) |
 | ChatGPT login: quota in the dashboard | Yes | **No** |
-| Claude login | Any app | Claude Code only (other apps need a Claude API key) |
+| Claude login | Any app | Claude Code only (Anthropic answers other apps with HTTP 429; use a Claude API key) |
 | Logins | Every CPA provider | Claude, ChatGPT, Kimi, and Vertex service accounts |
 | Images, video, speech (`/v1/images`, `/v1/videos`, `/v1/audio/speech`) | Yes | **No** |
 | Responses WebSocket, `/v1/responses/compact`, legacy `/v1/completions` | Yes | **No** |

@@ -896,6 +896,14 @@ describe("Claude Code on ChatGPT logins and Codex keys", () => {
     expect(await sent?.json()).toMatchObject({ model: "gpt-5.6-sol", stream: true, store: false, input: [{ role: "developer" }, { role: "user", content: [{ type: "input_text", text: "hello" }] }] });
   });
 
+  it("never sends a Responses client's Claude model to a ChatGPT login", async () => {
+    const { config, seen } = await loginSetup();
+    const response = await handle(at("/v1/responses", { method: "POST", headers: { authorization: `Bearer ${KEY}` }, body: '{"model":"claude-sonnet-5-5","input":"hi"}' }), config);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { message: expect.stringMatching(/Claude logins serve Claude Code only/) } });
+    expect(seen).toHaveLength(0);
+  });
+
   it("answers a non-streaming request and counts tokens without an upstream call", async () => {
     const { config, seen } = await loginSetup();
     const whole = await handle(messages({ "x-api-key": KEY }, '{"model":"gpt-5.6-sol","max_tokens":8,"messages":[{"role":"user","content":"hello"}]}'), config);
