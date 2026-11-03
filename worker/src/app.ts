@@ -542,8 +542,9 @@ async function proxied(request: Request, url: URL, route: Route & { format: Form
   const loginsFor = (provider: LoginEntry["provider"], upstreamModel = bare) =>
     logins.filter((login) => login.provider === provider && (prefix === "" || login.prefix === prefix)).map((login) => (provider === "kimi" || provider === "vertex" ? servedCandidate(login, upstreamModel) : loginCandidate(login, upstreamModel)));
   if (route.format === "claude" && /^claude-/i.test(bare)) usable.push(...loginsFor("claude"));
-  // ChatGPT logins take Codex's own models, and any Responses model nothing else serves.
-  if (route.format === "openai-response" && (inDefaultFamily("codex", bare) || usable.length === 0)) usable.push(...loginsFor("codex"));
+  // ChatGPT logins take Codex's own models, and any other Responses model nothing else serves,
+  // except Claude models: those belong to a Claude key or login, never to ChatGPT.
+  if (route.format === "openai-response" && (inDefaultFamily("codex", bare) || (usable.length === 0 && !/^claude-/i.test(bare)))) usable.push(...loginsFor("codex"));
   // Claude Code or a Chat client asking for a ChatGPT model by name, e.g. ANTHROPIC_MODEL=gpt-5.6-sol.
   if ((route.format === "claude" || route.format === "openai") && inDefaultFamily("codex", bare)) usable.push(...loginsFor("codex"));
   // Vertex service accounts take Gemini models, from any client, translated where needed.
