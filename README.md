@@ -9,7 +9,7 @@ Free and open source; sub2api never charges you anything.
 
 | Install | Your Cloudflare plan | What runs | Deploy |
 |---|---|---|---|
-| **Container** | Workers Paid<br>($5/month, for Containers) | The latest CPA release<br>in a container | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
+| **Container** | Workers Paid ($5/month, for Containers) | The latest CPA release in a container | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
 
 ## Why
 
