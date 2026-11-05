@@ -5,12 +5,11 @@
 
 **Literally the [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA) project, deployed as a Cloudflare Worker in one click.** Turn your Claude, ChatGPT Codex, Gemini and Kimi subscriptions into your own private API. Point Claude Code, the Anthropic or OpenAI SDKs, or any app at your gateway URL and use your subscription from anywhere, with no server or home machine left running.
 
-Two ways to install. Both are free and open source, with the same dashboard; sub2api never charges you anything. Pick by the Cloudflare plan you already have:
+Free and open source; sub2api never charges you anything.
 
 | Install | Your Cloudflare plan | What runs | Deploy |
 |---|---|---|---|
 | **Container** | Workers Paid<br>($5/month, for Containers) | The latest CPA release<br>in a container | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
-| **Workers&#8209;only** | Workers Free | Our TypeScript port of CPA:<br>any app to any provider<br>(see [limits](#limits-of-the-workers-only-install)) | <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/worker"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a> |
 
 ## Why
 
@@ -24,9 +23,9 @@ Two ways to install. Both are free and open source, with the same dashboard; sub
 
 You need a Cloudflare account on the [Workers Paid plan](https://developers.cloudflare.com/workers/platform/pricing/) ($5/month; Containers require it).
 
-On Workers Free? Use the **Workers-only** button above instead; see [worker/README.md](worker/README.md).
+On Workers Free? See the [Workers-only install](#workers-only-install-api-keys-plus-limited-logins).
 
-1. Press the **Container** install's **Deploy to Cloudflare** button above.
+1. Press the **Deploy to Cloudflare** button above.
 2. Set the two secrets it asks for. Each needs at least 32 characters of `A-Z a-z 0-9 _ -`; `openssl rand -hex 32` makes one:
    - `DASHBOARD_PASSWORD`: your dashboard sign-in password.
    - `MANAGEMENT_KEY`: CPA's management key, asked for after sign-in.
@@ -64,7 +63,7 @@ curl https://sub2api.<your-subdomain>.workers.dev/v1/messages \
   -d '{"model":"claude-sonnet-5-5","max_tokens":64,"messages":[{"role":"user","content":"Say hi"}]}'
 ```
 
-On the Workers-only install the host is `sub2api.<your-subdomain>.workers.dev`. `GET /v1/models` lists what your subscriptions offer. Give each app its own key, so you can revoke one without touching the rest.
+`GET /v1/models` lists what your subscriptions offer. Give each app its own key, so you can revoke one without touching the rest.
 
 ## How it works
 
@@ -75,44 +74,6 @@ app ──► Worker ──► Durable Object ──► Container: CPA ──►
 ```
 
 The Worker hands every request to one Durable Object in front of the CPA container. The Durable Object refuses API calls until a key exists and keeps the dashboard behind a password. CPA's S3 storage is served from an R2 binding, so you never create storage keys. See [SECURITY.md](SECURITY.md) for the full model.
-
-The **Workers-only** install has no container. The Worker runs our TypeScript port of CPA itself, and one Durable Object keeps logins, config, usage and logs:
-
-```
-app ──► Worker: CPA port ──► Claude / Codex / Gemini / Vertex / Kimi / xAI / OpenAI-compatible
-        · API key check         · any app format to any provider
-        · dashboard sign-in     · routing, failover, cooldowns
-          │
-          └─► Durable Object (SQLite): logins, config, usage, logs
-```
-
-See [worker/README.md](worker/README.md) for what it covers.
-
-## Limits of the Workers-only install
-
-The Workers-only install is a smaller rewrite of CPA that fits the free plan. If you need anything marked **No**, use the Container install.
-
-| Feature | Container | Workers&#8209;only |
-|---|---|---|
-| ChatGPT (Codex) login: text and code | Yes | **No**: chatgpt.com blocks Workers with HTTP 403 (use a Codex API key) |
-| ChatGPT login: voice | WebSocket and WebRTC | WebSocket only (WebRTC gets the same 403) |
-| ChatGPT login: quota in the dashboard | Yes | **No** |
-| Claude login | Any app | Claude Code only (Anthropic answers other apps with HTTP 429; use a Claude API key) |
-| Logins | Every CPA provider | Claude, ChatGPT, Kimi, and Vertex service accounts |
-| Images, video, speech (`/v1/images`, `/v1/videos`, `/v1/audio/speech`) | Yes | **No** |
-| Responses WebSocket, `/v1/responses/compact`, legacy `/v1/completions` | Yes | **No** |
-| Realtime client secrets, sideband, SIP, translations | Yes | **No** |
-| Request logs | Full detail | Last 2,000 lines, no request detail |
-| Gemini safety filters | Off, as in CPA | Google's defaults |
-
-Workers Free also caps every account ([Workers](https://developers.cloudflare.com/workers/platform/limits/), [Durable Objects](https://developers.cloudflare.com/durable-objects/platform/pricing/)). Past a cap, calls fail until 00:00 UTC:
-
-- **100,000 requests a day**, for the Worker and for its Durable Object. Each API call uses both.
-- **10 ms of CPU per request.** Claude Code and Codex CLI calls use under 1 ms, but a very long conversation translated between formats can run out and fail.
-- **50 outgoing requests per request**, so a call tries at most 10 logins or keys before it gives up.
-- **5 GB of storage** in total.
-
-Moving to Workers Paid? `sh scripts/move-to-container.sh`, or the **move to container** workflow, copies your logins, API keys and config into the Container install's R2 bucket and keeps a backup there. Add `--replace` (the workflow's `replace` step) to then swap the Worker for the Container install.
 
 ## Update
 
@@ -152,6 +113,50 @@ sh test/container-smoke.sh  # needs Docker: runs CPA against the R2 shim
 
 The container builds the newest CPA release and dashboard by default. To freeze them, set `CPA_VERSION`, `PANEL_VERSION` and `PANEL_SHA256` in `container/Dockerfile`.
 </details>
+
+## Workers-only install (API keys, plus limited logins)
+
+For Workers Free. No container: the Worker runs our TypeScript port of CPA, with the same dashboard. API keys work with every app and provider. Logins are limited: Claude login works only with Claude Code, and ChatGPT login only for voice over WebSocket.
+
+<a href="https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/worker"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" width="170"></a>
+
+See [worker/README.md](worker/README.md) for setup.
+
+One Durable Object keeps logins, config, usage and logs:
+
+```
+app ──► Worker: CPA port ──► Claude / Codex / Gemini / Vertex / Kimi / xAI / OpenAI-compatible
+        · API key check         · any app format to any provider
+        · dashboard sign-in     · routing, failover, cooldowns
+          │
+          └─► Durable Object (SQLite): logins, config, usage, logs
+```
+
+### Limits
+
+If you need anything marked **No**, use the Container install.
+
+| Feature | Container | Workers&#8209;only |
+|---|---|---|
+| ChatGPT (Codex) login: text and code | Yes | **No**: chatgpt.com blocks Workers with HTTP 403 (use a Codex API key) |
+| ChatGPT login: voice | WebSocket and WebRTC | WebSocket only (WebRTC gets the same 403) |
+| ChatGPT login: quota in the dashboard | Yes | **No** |
+| Claude login | Any app | Claude Code only (Anthropic answers other apps with HTTP 429; use a Claude API key) |
+| Logins | Every CPA provider | Claude, ChatGPT, Kimi, and Vertex service accounts |
+| Images, video, speech (`/v1/images`, `/v1/videos`, `/v1/audio/speech`) | Yes | **No** |
+| Responses WebSocket, `/v1/responses/compact`, legacy `/v1/completions` | Yes | **No** |
+| Realtime client secrets, sideband, SIP, translations | Yes | **No** |
+| Request logs | Full detail | Last 2,000 lines, no request detail |
+| Gemini safety filters | Off, as in CPA | Google's defaults |
+
+Workers Free also caps every account ([Workers](https://developers.cloudflare.com/workers/platform/limits/), [Durable Objects](https://developers.cloudflare.com/durable-objects/platform/pricing/)). Past a cap, calls fail until 00:00 UTC:
+
+- **100,000 requests a day**, for the Worker and for its Durable Object. Each API call uses both.
+- **10 ms of CPU per request.** Claude Code and Codex CLI calls use under 1 ms, but a very long conversation translated between formats can run out and fail.
+- **50 outgoing requests per request**, so a call tries at most 10 logins or keys before it gives up.
+- **5 GB of storage** in total.
+
+Moving to Workers Paid? `sh scripts/move-to-container.sh`, or the **move to container** workflow, copies your logins, API keys and config into the Container install's R2 bucket and keeps a backup there. Add `--replace` (the workflow's `replace` step) to then swap the Worker for the Container install.
 
 ## Good to know
 
