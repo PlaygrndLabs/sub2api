@@ -19,29 +19,37 @@ concurrency:
 
 jobs:
   deploy:
-    # Opt-in: set the DEPLOY_CONTAINER repository variable to true to deploy the Container install.
-    if: vars.DEPLOY_CONTAINER == 'true' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    if: (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
     runs-on: ubuntu-latest
     # The Cloudflare token goes only to the steps that call Cloudflare, never to npm install
     # scripts or the upstream CPA build in the smoke test.
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
       - name: Check Cloudflare credentials
         id: creds
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          EVENT: ${{ github.event_name }}
+        # Both installs deploy as the Worker sub2api, so this only ever updates the install that is
+        # already live (scripts/live-install.mjs).
+        # With no Worker yet, only a manual run deploys the Container install.
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
             echo "::notice::Skipping deploy: add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID as repository secrets to deploy from GitHub Actions."
             echo "ready=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-      - if: steps.creds.outputs.ready == 'true'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-          persist-credentials: false
+          live=$(node scripts/live-install.mjs)
+          if [ "$live" = container ] || { [ "$live" = none ] && [ "$EVENT" = workflow_dispatch ]; }; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Skipping deploy: the Worker sub2api is $live, not the Container install (none means not deployed yet; run this workflow by hand)."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
       - if: steps.creds.outputs.ready == 'true'
         uses: actions/setup-node@v4
         with:
