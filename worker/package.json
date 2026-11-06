@@ -1,6 +1,6 @@
 {
   "name": "sub2api-worker",
-  "description": "sub2api for the Cloudflare Workers Free plan: a TypeScript gateway that needs no container.",
+  "description": "sub2api (beta) for the Cloudflare Workers Free plan: a TypeScript gateway that needs no container.",
   "license": "MIT",
   "private": true,
   "type": "module",

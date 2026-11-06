@@ -23,7 +23,7 @@ Free and open source; sub2api never charges you anything.
 
 You need a Cloudflare account on the [Workers Paid plan](https://developers.cloudflare.com/workers/platform/pricing/) ($5/month; Containers require it).
 
-On Workers Free? See the [Workers-only install](#workers-only-install-api-keys-plus-limited-logins).
+On Workers Free? See the [Workers-only install (beta)](#workers-only-install-beta).
 
 1. Press the **Deploy to Cloudflare** button above.
 2. Set the two secrets it asks for. Each needs at least 32 characters of `A-Z a-z 0-9 _ -`; `openssl rand -hex 32` makes one:
@@ -114,7 +114,9 @@ sh test/container-smoke.sh  # needs Docker: runs CPA against the R2 shim
 The container builds the newest CPA release and dashboard by default. To freeze them, set `CPA_VERSION`, `PANEL_VERSION` and `PANEL_SHA256` in `container/Dockerfile`.
 </details>
 
-## Workers-only install (API keys, plus limited logins)
+## Workers-only install (beta)
+
+**Beta.** The Container install is the main install. This one is still in progress and may change between releases.
 
 For Workers Free. No container: the Worker runs our TypeScript port of CPA, with the same dashboard. API keys work with every app and provider. Logins are limited: Claude login works only with Claude Code, and ChatGPT login only for voice over WebSocket.
 
