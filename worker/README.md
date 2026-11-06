@@ -1,4 +1,6 @@
-# sub2api, Workers-only install
+# sub2api, Workers-only install (beta)
+
+**Beta.** The [Container install](../README.md) is the main install. This one is still in progress and may change between releases.
 
 A version of sub2api with no container, for Cloudflare's **Workers Free** plan. It is a TypeScript rewrite of CPA (CLIProxyAPI), not CPA itself, and serves **CPA's own dashboard** (Cli-Proxy-API-Management-Center) through a port of CPA's v8 management API. So both installs look and work the same in the browser.
 
