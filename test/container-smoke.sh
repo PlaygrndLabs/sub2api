@@ -6,7 +6,7 @@
 set -eu
 
 IMAGE=${IMAGE:-sub2api-cpa:test}
-NODE_IMAGE=node:24-alpine
+NODE_IMAGE=node:26-alpine
 NET=sub2api-smoke
 PORT=18317
 CLIENT_KEY=client-key-0123456789abcdef0123456789abcdef
