@@ -22,7 +22,7 @@ jobs:
     # The Cloudflare token goes only to the steps that call Cloudflare, never to npm install
     # scripts or the Claude Code check.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Check Cloudflare credentials
@@ -47,9 +47,9 @@ jobs:
             echo "ready=false" >> "$GITHUB_OUTPUT"
           fi
       - if: steps.creds.outputs.ready == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: worker/package-lock.json
       # Installed and deployed from worker/, as the Deploy button does, so the build step finds its script.
@@ -87,6 +87,6 @@ jobs:
           curl -sS -o models.json -w "HTTP %{http_code}\n" "$ANTHROPIC_BASE_URL/v1/models" -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01"
           head -c 400 models.json; echo
           echo "== Claude Code, one prompt"
-          npx -y @anthropic-ai/claude-code@2.1.296 -p "Reply with exactly: gateway works" --output-format text 2>&1 | tail -20
+          npx -y @anthropic-ai/claude-code@2.1.325 -p "Reply with exactly: gateway works" --output-format text 2>&1 | tail -20
           echo "== Claude Code, a longer streamed answer"
-          npx -y @anthropic-ai/claude-code@2.1.296 -p "Count from 1 to 200, comma separated." --output-format text 2>&1 | tail -c 600
+          npx -y @anthropic-ai/claude-code@2.1.325 -p "Count from 1 to 200, comma separated." --output-format text 2>&1 | tail -c 600
