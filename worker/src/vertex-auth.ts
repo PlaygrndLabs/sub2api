@@ -96,7 +96,7 @@ function derLength(length: number): number[] {
 const RSA_ALGORITHM = [0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00];
 
 // Google issues PKCS #8 keys, but CPA rewrites them as PKCS #1, which Web Crypto can't import.
-export function pkcs8Of(pem: string): Uint8Array {
+export function pkcs8Of(pem: string): Uint8Array<ArrayBuffer> {
   const match = /-----BEGIN (RSA )?PRIVATE KEY-----([\s\S]*?)-----END \1?PRIVATE KEY-----/.exec(pem.replaceAll("\\n", "\n"));
   if (match === null) throw new OAuthError("The service account's private_key isn't a PEM key", 400);
   const der = Uint8Array.from(atob((match[2] ?? "").replace(/\s+/g, "")), (char) => char.charCodeAt(0));

@@ -4,7 +4,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "sub2api",
   "main": "src/index.ts",
-  "compatibility_date": "2026-10-01",
+  "compatibility_date": "2026-11-13",
   "workers_dev": true,
   "observability": { "enabled": true },
   // CPA's official dashboard, downloaded before each build. The Worker runs first so the page

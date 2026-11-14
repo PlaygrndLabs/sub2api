@@ -1,4 +1,4 @@
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.27-trixie AS builder
 # "latest" builds the newest CPA release tag at build time; set a tag such as v8.0.45 to pin one.
 ARG CPA_VERSION=latest
 ENV GOTOOLCHAIN=auto
@@ -15,7 +15,7 @@ RUN CGO_ENABLED=1 GOOS=linux go build -buildvcs=false \
   -ldflags="-s -w -X 'main.Version=$(cat /tmp/cpa-version)' -X 'main.Commit=$(git rev-parse HEAD)'" \
   -o /out/CLIProxyAPI ./cmd/server/
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 # The dashboard follows CPA: "latest" takes the newest release. Pin a tag, and optionally its
 # PANEL_SHA256, to freeze it.
 ARG PANEL_VERSION=latest
