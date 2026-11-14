@@ -27,6 +27,9 @@
   ],
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "types": "wrangler types --include-env=false",
     "typecheck": "tsc && tsc -p tsconfig.node.json",
@@ -37,16 +40,16 @@
   },
   "dependencies": {
     "@cloudflare/containers": "0.3.7",
-    "yaml": "2.8.1"
+    "yaml": "2.9.1"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "@types/node": "22.20.5",
-    "eslint": "10.12.0",
+    "@types/node": "26.6.6",
+    "eslint": "10.15.0",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.71.1",
-    "vitest": "5.0.4",
-    "wrangler": "4.149.0"
+    "typescript-eslint": "8.72.2",
+    "vitest": "5.1.0",
+    "wrangler": "4.162.0"
   },
   "cloudflare": {
     "bindings": {
@@ -56,6 +59,11 @@
       "MANAGEMENT_KEY": {
         "description": "CPA management key, asked for inside the dashboard. At least 32 characters of A-Z a-z 0-9 _ -, for example `openssl rand -hex 32`. Used on first start only; change it in the dashboard afterwards."
       }
+    }
+  },
+  "overrides": {
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "^11.0.8"
     }
   }
 }
