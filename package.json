@@ -55,9 +55,6 @@
     "bindings": {
       "DASHBOARD_PASSWORD": {
         "description": "Password for the dashboard sign-in at /login. Use a long random string, for example `openssl rand -base64 30`."
-      },
-      "MANAGEMENT_KEY": {
-        "description": "CPA management key. You never type it: after you sign in, the gateway sends it to CPA for you. At least 32 characters of A-Z a-z 0-9 _ -, for example `openssl rand -hex 32`."
       }
     }
   },

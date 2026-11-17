@@ -26,9 +26,7 @@ You need a Cloudflare account on the [Workers Paid plan](https://developers.clou
 On Workers Free? See the [Workers-only install (beta)](#workers-only-install-beta).
 
 1. Press the **Deploy to Cloudflare** button above.
-2. Set the two secrets it asks for. Each needs at least 32 characters of `A-Z a-z 0-9 _ -`; `openssl rand -hex 32` makes one:
-   - `DASHBOARD_PASSWORD`: your dashboard sign-in password.
-   - `MANAGEMENT_KEY`: CPA's management key. You never type it: after you sign in, the gateway sends it to CPA for you.
+2. Set the one secret it asks for, `DASHBOARD_PASSWORD`: your dashboard sign-in password. Use at least 32 characters of `A-Z a-z 0-9 _ -`; `openssl rand -hex 32` makes one. CPA's management key is derived from it on the server, so you never set or type one.
 3. Open `https://sub2api.<your-subdomain>.workers.dev`, sign in, and create an API key under **API Keys**.
 
 ## Connect a subscription
@@ -94,12 +92,12 @@ npm ci
 npx wrangler login
 npx wrangler r2 bucket create sub2api
 npx wrangler deploy        # needs Docker to build the image
-sh scripts/set-secrets.sh  # generates both secrets, stores them, prints them once
+sh scripts/set-secrets.sh  # generates the password, stores it, prints it once
 ```
 
 To deploy from GitHub Actions, add the repository secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts, Containers, Workers R2 Storage: Edit) and `CLOUDFLARE_ACCOUNT_ID`, then run the **deploy container** workflow once by hand. After that, every green `ci` run on `main` deploys, and a weekly run picks up the newest CPA release. Each deploy updates only the install your Worker `sub2api` already runs, so neither workflow overwrites the other install.
 
-Both secrets can be changed any time with `wrangler secret put`. CPA always accepts `MANAGEMENT_KEY`, even after its own key is changed in the dashboard. Changing `DASHBOARD_PASSWORD` signs out every session.
+Change the password any time with `wrangler secret put DASHBOARD_PASSWORD`. It signs out every session, and the container restarts on the next dashboard call to pick up the new management key. Installs that already set a `MANAGEMENT_KEY` secret keep using it; CPA always accepts that key, even after its own key is changed in the dashboard.
 </details>
 
 <details>

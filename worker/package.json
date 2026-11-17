@@ -18,9 +18,6 @@
     "bindings": {
       "DASHBOARD_PASSWORD": {
         "description": "Password for the dashboard sign-in. At least 16 characters, for example `openssl rand -hex 24`."
-      },
-      "MANAGEMENT_KEY": {
-        "description": "The management key, as on the Container install. You never type it; it turns the management API on. At least 16 characters and different from DASHBOARD_PASSWORD, for example `openssl rand -hex 24`."
       }
     }
   },
