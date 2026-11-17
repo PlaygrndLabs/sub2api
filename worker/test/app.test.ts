@@ -85,7 +85,7 @@ async function setup(upstream: (request: Request) => Promise<Response> = async (
       seen.push(request);
       return upstream(request);
     },
-    panel: async () => new Response("<html>CPA panel</html>", { headers: { "content-type": "text/html" } }),
+    panel: async () => new Response("<html><head></head><body>CPA panel</body></html>", { headers: { "content-type": "text/html", "content-length": "48" } }),
     cache: new EdgeCache(),
     waitUntil: (promise) => later.push(promise),
     usageFlushMs: 0,
@@ -611,7 +611,12 @@ describe("dashboard", () => {
     expect((await handle(at("/management.html"), config)).headers.get("location")).toBe("/login");
     expect((await handle(at("/", { headers: { cookie: await cookie() } }), config)).headers.get("location")).toBe("/management.html");
     const panel = await handle(at("/management.html", { headers: { cookie: await cookie() } }), config);
-    expect(await panel.text()).toContain("CPA panel");
+    const html = await panel.text();
+    expect(html).toContain("CPA panel");
+    expect(html).toContain('<head><script>(() => {');
+    expect(html).not.toContain(MANAGEMENT_KEY);
+    expect(panel.headers.get("content-length")).toBeNull();
+    expect(panel.headers.get("cache-control")).toBe("no-store");
     expect(panel.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
     expect(panel.headers.get("x-frame-options")).toBe("DENY");
   });
@@ -640,14 +645,14 @@ describe("dashboard", () => {
 describe("management API", () => {
   const managementCall = async (path: string, headers: Record<string, string>, init: RequestInit = {}) => at(path, { ...init, headers: { cookie: await cookie(), ...headers } });
 
-  it("needs both the sign-in cookie and the management key", async () => {
+  it("needs the sign-in cookie and the dashboard's key header, whatever its value", async () => {
     const { config, backend } = await setup();
     expect((await handle(at("/v8/management/config", { headers: { authorization: `Bearer ${MANAGEMENT_KEY}` } }), config)).status).toBe(401);
-    expect((await handle(await managementCall("/v8/management/config", { authorization: "Bearer wrong" }), config)).status).toBe(401);
+    expect((await handle(await managementCall("/v8/management/config", {}, { method: "PATCH", body: "{}" }), config)).status).toBe(401);
     expect(backend.managed).toHaveLength(0);
-    const response = await handle(await managementCall("/v8/management/config", { "x-management-key": MANAGEMENT_KEY }), config);
+    const response = await handle(await managementCall("/v8/management/config", { authorization: "Bearer sub2api-session", "x-management-key": "x" }), config);
     expect(response.status).toBe(200);
-    expect(backend.managed[0]?.headers.get("cookie")).toBeNull();
+    for (const name of ["cookie", "authorization", "x-management-key"]) expect(backend.managed[0]?.headers.get(name)).toBeNull();
   });
 
   it("is off until its own long enough key is set, never the sign-in password", async () => {

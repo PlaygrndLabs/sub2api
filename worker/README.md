@@ -42,10 +42,9 @@ sh ../scripts/set-secrets.sh   # generates both secrets, stores them, prints the
 
 The Worker is named `sub2api`, like the Container install, so put only one of the two on an account. Installs made before 2026-10-29 were named `sub2api-free`, and updating one creates a new, empty Worker. To keep your logins and keys, set `"name": "sub2api-free"` in `worker/wrangler.jsonc` before you update.
 
-1. Open `https://sub2api.<your-subdomain>.workers.dev` and sign in with the dashboard password.
-2. CPA's dashboard opens and asks for the management key: enter `MANAGEMENT_KEY`.
-3. Under **OAuth Login**, press **+** on Claude, approve on Claude's page, then paste the `localhost` address you land on into **Callback URL**.
-4. Under **Config Panel**, add an API key and save, then point Claude Code at the gateway:
+1. Open `https://sub2api.<your-subdomain>.workers.dev` and sign in with the dashboard password. CPA's dashboard opens already signed in.
+2. Under **OAuth Login**, press **+** on Claude, approve on Claude's page, then paste the `localhost` address you land on into **Callback URL**.
+3. Under **Config Panel**, add an API key and save, then point Claude Code at the gateway:
 
 ```bash
 export ANTHROPIC_BASE_URL=https://sub2api.<your-subdomain>.workers.dev
@@ -70,7 +69,7 @@ model_catalog_url = "https://sub2api.<your-subdomain>.workers.dev/v1/models"
 
 Keys and the login made with the first Workers-only release keep working: the old login is turned into an auth file on first use.
 
-The management API sits behind both the sign-in cookie and the management key. It stays off until `MANAGEMENT_KEY` is set to at least 16 characters and differs from the dashboard password, because the dashboard keeps the key in browser storage.
+The management API sits behind the sign-in cookie. The management key never reaches the browser: the dashboard gets a placeholder and the gateway checks the session instead. The API stays off until `MANAGEMENT_KEY` is set to at least 16 characters and differs from the dashboard password.
 
 ## Deploying from GitHub
 

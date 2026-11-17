@@ -11,6 +11,7 @@ import { callBody, callResponse, MAX_CALL_BODY, realtimeCallRequest, realtimeErr
 import { codexModelCatalog } from "./codex-models.ts";
 import { MANAGEMENT_PREFIX } from "./management.ts";
 import { CatalogCache, claudeModelList, geminiModel, geminiModelList, openaiModelList, servedModels } from "./models.ts";
+import { dashboardPage, hasManagementHeader } from "./dashboard-autologin.ts";
 import { loginPage, messagePage } from "./pages.ts";
 import { candidates, inDefaultFamily, NATIVE_FORMAT, splitModel, takesNatively, type Candidate, type Format, type LoginEntry, type RoutingTable } from "./providers.ts";
 import { CODEX_UPSTREAM, codexRequest, downstreamResponse, edgeBlocked, edgeBlockError, formatError, presentedKey, providerRequest, routeOf, upstreamRequest, UPSTREAM, type Route } from "./proxy.ts";
@@ -836,47 +837,34 @@ async function login(request: Request, config: AppConfig): Promise<Response> {
   return redirect("/management.html", { "set-cookie": `${SESSION_COOKIE}=${token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${SESSION_SECONDS}` });
 }
 
-// The dashboard is third-party HTML that holds the management key, so it is never framed.
+// The dashboard is third-party HTML, served with the script that signs it in (dashboard-autologin.ts).
 async function panel(request: Request, config: AppConfig): Promise<Response> {
-  const response = await config.panel(request);
-  const headers = new Headers(response.headers);
-  headers.set("content-security-policy", "frame-ancestors 'none'");
-  headers.set("x-frame-options", "DENY");
-  headers.set("x-content-type-options", "nosniff");
-  headers.set("referrer-policy", "same-origin");
-  headers.set("cache-control", "no-store");
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  return dashboardPage(await config.panel(request));
 }
 
-function withoutCookies(request: Request, target?: URL): Request {
+// The management backend needs neither the session cookie nor the dashboard's placeholder key.
+function withoutCredentials(request: Request, target?: URL): Request {
   const headers = new Headers(request.headers);
-  headers.delete("cookie");
+  for (const name of ["cookie", "authorization", "x-management-key"]) headers.delete(name);
   return new Request(target ?? request.url, new Request(request, { headers }));
 }
 
-// As on the Container install, the management key is its own secret: the dashboard keeps it in
-// browser storage, so it must never be the sign-in password.
+// As on the Container install, MANAGEMENT_KEY must be set and differ from the sign-in password
+// before the management API turns on.
 const MANAGEMENT_KEY_NOT_SET = `The management API is off: set the MANAGEMENT_KEY secret to at least ${MIN_MANAGEMENT_KEY_LENGTH} characters, different from DASHBOARD_PASSWORD.`;
 
 function managementEnabled(config: AppConfig): boolean {
   return config.managementKey.length >= MIN_MANAGEMENT_KEY_LENGTH && config.managementKey !== config.dashboardPassword;
 }
 
-// The dashboard sends CPA's management key with every call, on top of the sign-in cookie.
-async function managementKeyValid(request: Request, config: AppConfig): Promise<boolean> {
-  if (!managementEnabled(config)) return false;
-  const bearer = request.headers.get("authorization")?.replace(/^bearer\s+/i, "").trim();
-  const given = bearer || request.headers.get("x-management-key")?.trim() || "";
-  return given !== "" && passwordMatches(given, config.managementKey);
-}
-
 async function management(request: Request, url: URL, config: AppConfig): Promise<Response> {
   if (!(await signedIn(request, config))) return Response.json({ error: "sign in at /login first" }, { status: 401 });
   if (!managementEnabled(config)) return Response.json({ error: MANAGEMENT_KEY_NOT_SET }, { status: 503 });
-  if (!(await managementKeyValid(request, config))) return Response.json({ error: "invalid management key" }, { status: 401 });
+  // The sign-in cookie is the only login; the dashboard's key header is a placeholder.
+  if (!hasManagementHeader(request)) return Response.json({ error: "missing management key" }, { status: 401 });
   // The dashboard checks a server with v0's config read before switching to v8.
   const target = url.pathname === "/v0/management/config" ? new URL(`${MANAGEMENT_PREFIX}/config${url.search}`, url) : url;
-  const response = await config.backend.manage(withoutCookies(request, target));
+  const response = await config.backend.manage(withoutCredentials(request, target));
   // A write may change providers, remove a key or a login, so this isolate checks again at once.
   if (request.method !== "GET") config.cache.forgetConfig();
   return response;

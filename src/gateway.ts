@@ -1,7 +1,8 @@
 import type { KeyGuard } from "./key-guard.ts";
 import { classify } from "./routes.ts";
 import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "../worker/src/session.ts";
-import { loginPage, messagePage } from "./login-page.ts";
+import { dashboardPage, hasManagementHeader, plainPageRequest, withManagementKey } from "../worker/src/dashboard-autologin.ts";
+import { loginPage, messagePage } from "../worker/src/pages.ts";
 
 export type Forward = (request: Request) => Promise<Response>;
 
@@ -11,6 +12,9 @@ export interface LoginLimiter {
 
 export interface GatewayConfig {
   readonly dashboardPassword: string;
+  // CPA accepts it as MANAGEMENT_PASSWORD (container/entrypoint.sh), even after the dashboard
+  // changes its own key, so the gateway can always send it for a signed-in user.
+  readonly managementKey: string;
   readonly nowSeconds: () => number;
   readonly keyGuard: KeyGuard;
   readonly loginLimiter: LoginLimiter;
@@ -64,10 +68,17 @@ async function api(request: Request, url: URL, config: GatewayConfig, forward: F
   }
 }
 
-async function dashboard(request: Request, config: GatewayConfig, forward: Forward): Promise<Response> {
+// The session cookie is the only login: the gateway sends the management key itself.
+async function dashboard(request: Request, url: URL, config: GatewayConfig, forward: Forward): Promise<Response> {
+  if (url.pathname === "/management.html") {
+    if (request.method !== "GET" && request.method !== "HEAD") return notFound();
+    return dashboardPage(await forward(plainPageRequest(request)));
+  }
+  if (!hasManagementHeader(request)) return Response.json({ error: "missing management key" }, { status: 401 });
+  if (config.managementKey === "") return Response.json({ error: "The MANAGEMENT_KEY secret is not set." }, { status: 503 });
   const writes = request.method !== "GET" && request.method !== "HEAD";
   if (writes) config.keyGuard.forget();
-  const response = await forward(withoutCookies(request));
+  const response = await forward(new Request(request, { headers: withManagementKey(request.headers, config.managementKey) }));
   if (writes) config.keyGuard.forget();
   return response;
 }
@@ -130,7 +141,7 @@ export async function handle(request: Request, config: GatewayConfig, forward: F
     case "logout":
       return redirect("/login", { "set-cookie": `${SESSION_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0` });
     case "dashboard":
-      if (await signedIn(request, config)) return dashboard(request, config, forward);
+      if (await signedIn(request, config)) return dashboard(request, url, config, forward);
       if (request.method === "GET" && url.pathname === "/management.html") return redirect("/login");
       return Response.json({ error: "sign in at /login first" }, { status: 401 });
     case "blocked":

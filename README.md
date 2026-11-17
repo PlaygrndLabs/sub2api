@@ -28,7 +28,7 @@ On Workers Free? See the [Workers-only install (beta)](#workers-only-install-bet
 1. Press the **Deploy to Cloudflare** button above.
 2. Set the two secrets it asks for. Each needs at least 32 characters of `A-Z a-z 0-9 _ -`; `openssl rand -hex 32` makes one:
    - `DASHBOARD_PASSWORD`: your dashboard sign-in password.
-   - `MANAGEMENT_KEY`: CPA's management key, asked for after sign-in.
+   - `MANAGEMENT_KEY`: CPA's management key. You never type it: after you sign in, the gateway sends it to CPA for you.
 3. Open `https://sub2api.<your-subdomain>.workers.dev`, sign in, and create an API key under **API Keys**.
 
 ## Connect a subscription
@@ -99,7 +99,7 @@ sh scripts/set-secrets.sh  # generates both secrets, stores them, prints them on
 
 To deploy from GitHub Actions, add the repository secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts, Containers, Workers R2 Storage: Edit) and `CLOUDFLARE_ACCOUNT_ID`, then run the **deploy container** workflow once by hand. After that, every green `ci` run on `main` deploys, and a weekly run picks up the newest CPA release. Each deploy updates only the install your Worker `sub2api` already runs, so neither workflow overwrites the other install.
 
-`MANAGEMENT_KEY` seeds CPA's config on first start only; after that, change it in the dashboard. `DASHBOARD_PASSWORD` can be changed any time with `wrangler secret put DASHBOARD_PASSWORD`.
+Both secrets can be changed any time with `wrangler secret put`. CPA always accepts `MANAGEMENT_KEY`, even after its own key is changed in the dashboard. Changing `DASHBOARD_PASSWORD` signs out every session.
 </details>
 
 <details>
@@ -165,7 +165,6 @@ Moving to Workers Paid? `sh scripts/move-to-container.sh`, or the **move to cont
 - Requests reach providers from Cloudflare's network. **Check that your provider's terms allow how you use your subscription.**
 - The first request after the container sleeps takes a few seconds while it starts.
 - Cost is the $5 Workers Paid plan plus container time while awake. See [Containers pricing](https://developers.cloudflare.com/containers/pricing/).
-- Lost the management key? Set a new `MANAGEMENT_KEY` secret, delete `config/config.yaml` from the `sub2api` R2 bucket, and redeploy. CPA starts with a fresh config. Provider logins stay, but you recreate your app API keys.
 
 Built on [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). Not affiliated with Anthropic, OpenAI, Google or Cloudflare.
 
