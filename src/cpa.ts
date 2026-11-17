@@ -38,6 +38,7 @@ export class Cpa extends Container<Env> {
       request,
       {
         dashboardPassword: this.env.DASHBOARD_PASSWORD ?? "",
+        managementKey: this.env.MANAGEMENT_KEY ?? "",
         nowSeconds,
         keyGuard: this.keyGuard,
         loginLimiter: this.env.LOGIN_LIMIT,

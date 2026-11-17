@@ -7,11 +7,12 @@ import { SESSION_COOKIE, issueSession, passwordMatches, readCookie, sessionIsVal
 const PASSWORD = "correct-horse-battery-staple-0123456789";
 const NOW = 1_800_000_000;
 const CLIENT_KEY = "client-key-0123456789abcdef0123456789abcdef";
+const MANAGEMENT_KEY = "management-key-0123456789abcdef0123456789";
 
 const unlimited: LoginLimiter = { limit: async () => ({ success: true }) };
 
 function freshConfig(nowSeconds: () => number = () => NOW): GatewayConfig {
-  return { dashboardPassword: PASSWORD, nowSeconds, keyGuard: new KeyGuard(nowSeconds), loginLimiter: unlimited };
+  return { dashboardPassword: PASSWORD, managementKey: MANAGEMENT_KEY, nowSeconds, keyGuard: new KeyGuard(nowSeconds), loginLimiter: unlimited };
 }
 
 const config = freshConfig();
@@ -175,7 +176,7 @@ describe("handle", () => {
     await call();
     expect(probes).toHaveLength(2);
     keys.length = 0;
-    const save = at("/v8/management/config/access/api-keys", { method: "PUT", headers: { cookie: await sessionCookie() }, body: "[]" });
+    const save = at("/v8/management/config/access/api-keys", { method: "PUT", headers: { cookie: await sessionCookie(), authorization: "Bearer sub2api-session" }, body: "[]" });
     expect((await handle(save, guarded, forward)).status).toBe(200);
     expect((await call()).status).toBe(401);
     expect(probes).toHaveLength(3);
@@ -187,7 +188,7 @@ describe("handle", () => {
     let now = NOW;
     const guarded = freshConfig(() => now);
     const call = () => handle(at("/v1/models", { headers: { "x-api-key": CLIENT_KEY } }), guarded, forward);
-    const save = at("/v8/management/config/access/api-keys", { method: "PUT", headers: { cookie: await sessionCookie() }, body: "[]" });
+    const save = at("/v8/management/config/access/api-keys", { method: "PUT", headers: { cookie: await sessionCookie(), authorization: "Bearer sub2api-session" }, body: "[]" });
     await handle(save, guarded, forward);
     expect((await call()).status).toBe(200);
     keys.length = 0;
@@ -267,11 +268,52 @@ describe("handle", () => {
     expect(seen).toHaveLength(0);
   });
 
-  it("opens the dashboard with a valid session", async () => {
+  it("sends CPA the management key itself for a signed-in user", async () => {
     const { forward, seen } = recorder();
-    const response = await handle(at("/v8/management/config", { headers: { cookie: await sessionCookie() } }), config, forward);
+    const headers = { cookie: await sessionCookie(), authorization: "Bearer sub2api-session", "x-management-key": "typed-by-hand" };
+    const response = await handle(at("/v8/management/config", { headers }), config, forward);
     expect(response.status).toBe(200);
     expect(seen[0]?.headers.get("cookie")).toBeNull();
+    expect(seen[0]?.headers.get("x-management-key")).toBeNull();
+    expect(seen[0]?.headers.get("authorization")).toBe(`Bearer ${MANAGEMENT_KEY}`);
+  });
+
+  it("needs the dashboard's key header, which a cross-site form cannot send", async () => {
+    const { forward, seen } = recorder();
+    const response = await handle(at("/v8/management/config", { method: "PUT", headers: { cookie: await sessionCookie() }, body: "{}" }), config, forward);
+    expect(response.status).toBe(401);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("serves the dashboard with the sign-in script and without the session cookie", async () => {
+    const seen: Request[] = [];
+    const page: Forward = async (request) => {
+      seen.push(request);
+      return new Response("<!doctype html><html><head><title>CPA</title></head><body></body></html>", {
+        headers: { "content-type": "text/html; charset=utf-8", "content-length": "70", etag: "x" },
+      });
+    };
+    const headers = { cookie: await sessionCookie(), "accept-encoding": "gzip, zstd", range: "bytes=0-10", "if-none-match": "x" };
+    const response = await handle(at("/management.html", { headers }), config, page);
+    const html = await response.text();
+    expect(html).toMatch(/^<!doctype html><html><head><script>\(\(\) => \{/);
+    expect(html).toContain('"sub2api-session"');
+    expect(html).not.toContain(MANAGEMENT_KEY);
+    expect(html).not.toContain(PASSWORD);
+    expect(response.headers.get("content-length")).toBeNull();
+    expect(response.headers.get("etag")).toBeNull();
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-frame-options")).toBe("DENY");
+    for (const name of ["cookie", "accept-encoding", "range", "if-none-match"]) expect(seen[0]?.headers.get(name)).toBeNull();
+    const post = await handle(at("/management.html", { method: "POST", headers: { cookie: await sessionCookie() } }), config, page);
+    expect(post.status).toBe(404);
+  });
+
+  it("passes a compressed dashboard through unchanged", async () => {
+    const gzipped: Forward = async () => new Response("binary", { headers: { "content-type": "text/html", "content-encoding": "gzip" } });
+    const response = await handle(at("/management.html", { headers: { cookie: await sessionCookie() } }), config, gzipped);
+    expect(await response.text()).toBe("binary");
+    expect(response.headers.get("content-encoding")).toBe("gzip");
   });
 
   it("signs in with the right password and sets a strict cookie", async () => {

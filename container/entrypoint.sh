@@ -50,5 +50,9 @@ EOF
 fi
 chmod 600 /CLIProxyAPI/config.example.yaml
 
+# The gateway signs the dashboard in with this key for the user, so CPA must accept it even after
+# the key in its config is changed.
+MANAGEMENT_PASSWORD=$CPA_MANAGEMENT_KEY
+export MANAGEMENT_PASSWORD
 unset CPA_MANAGEMENT_KEY CPA_IMPORT_CONFIG
 exec /CLIProxyAPI/CLIProxyAPI
