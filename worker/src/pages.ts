@@ -102,8 +102,6 @@ function page(title: string, content: string): string {
   .art { position: relative; overflow: hidden; color: var(--dots); }
   .matrix { position: absolute; inset: 0; width: 100%; height: 100%; fill: currentColor;
     -webkit-mask-image: linear-gradient(90deg, #000 70%, transparent); mask-image: linear-gradient(90deg, #000 70%, transparent); }
-  .art::after { content: ""; position: absolute; inset: auto 0 0; height: 38%; background: linear-gradient(0deg, var(--bg) 25%, transparent); pointer-events: none; }
-  .art p { position: absolute; z-index: 1; left: 0; right: 0; bottom: 72px; margin: 0; text-align: center; font-size: clamp(28px, 2.6vw, 38px); font-weight: 700; letter-spacing: -.02em; }
   main { display: flex; align-items: center; justify-content: center; padding: 48px 32px; }
   .panel { width: min(360px, 100%); }
   h1 { margin: 0 0 28px; font-size: 32px; font-weight: 600; letter-spacing: -.02em; line-height: 1.15; }
@@ -126,7 +124,6 @@ function page(title: string, content: string): string {
   @media (max-width: 820px) {
     body { grid-template-columns: 1fr; grid-template-rows: 240px 1fr; }
     .matrix { -webkit-mask-image: linear-gradient(180deg, #000 40%, transparent); mask-image: linear-gradient(180deg, #000 40%, transparent); }
-    .art p { display: none; }
     main { align-items: flex-start; padding: 8px 24px 48px; }
     .panel { width: 100%; }
   }
@@ -134,7 +131,7 @@ function page(title: string, content: string): string {
 </style>
 </head>
 <body>
-<div class="art">${MATRIX}<p>Welcome back.</p></div>
+<div class="art">${MATRIX}</div>
 <main>
   <section class="panel">
       ${content}
