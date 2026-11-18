@@ -1,3 +1,3 @@
 # The Deploy to Cloudflare button asks for this secret before it deploys. It has no default,
-# so the field starts empty and you must type your own. `openssl rand -hex 24` makes one.
+# so the field starts empty and you must type your own. Any password works.
 DASHBOARD_PASSWORD=

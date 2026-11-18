@@ -23,10 +23,10 @@ Free and open source; sub2api never charges you anything.
 
 You need a Cloudflare account on the [Workers Paid plan](https://developers.cloudflare.com/workers/platform/pricing/) ($5/month; Containers require it).
 
-On Workers Free? See the [Workers-only install (beta)](#workers-only-install-beta).
+On Workers Free? See the [Workers-only install (beta)](#workers-only-install-beta). This button checks the plan first: on Workers Free the build stops before deploying anything and says so.
 
 1. Press the **Deploy to Cloudflare** button above.
-2. Fill in the one secret it asks for, `DASHBOARD_PASSWORD`: your dashboard sign-in password. The field starts empty and is required. Use at least 32 characters of `A-Z a-z 0-9 _ -`; `openssl rand -hex 32` makes one. CPA's management key is derived from it on the server, so you never set or type one.
+2. Fill in the one secret it asks for, `DASHBOARD_PASSWORD`: your dashboard sign-in password. The field starts empty and is required. Pick any password; a long one is harder to guess. CPA's management key is derived from it on the server, so you never set or type one.
 3. Open `https://sub2api.<your-subdomain>.workers.dev`, sign in, and create an API key under **API Keys**.
 
 ## Connect a subscription

@@ -80,9 +80,8 @@ fi
 cd "$root"
 "$wrangler" deploy
 cat <<'EOF'
-The Container install is deployed. Set its DASHBOARD_PASSWORD secret now (at least 32 characters
-of A-Z a-z 0-9 _ -, for example from `openssl rand -hex 32`), in the Cloudflare dashboard under
-Workers > sub2api > Settings, or with:
+The Container install is deployed. Set its DASHBOARD_PASSWORD secret now (any password; a long
+one is harder to guess), in the Cloudflare dashboard under Workers > sub2api > Settings, or with:
   npx wrangler secret put DASHBOARD_PASSWORD
 On its first start CPA takes the moved config and logins.
 EOF

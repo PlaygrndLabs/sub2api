@@ -8,22 +8,21 @@ set -eu
 DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-$(openssl rand -base64 30 | tr '+/' '-_' | tr -d '=')}
 MANAGEMENT_KEY=${MANAGEMENT_KEY:-}
 
-for value in "$DASHBOARD_PASSWORD" ${MANAGEMENT_KEY:+"$MANAGEMENT_KEY"}; do
-  if ! printf '%s' "$value" | grep -Eq '^[A-Za-z0-9_-]{32,}$'; then
-    echo "set-secrets: each value needs at least 32 characters of A-Z a-z 0-9 _ -" >&2
-    exit 64
-  fi
-done
-
-umask 077
-file=$(mktemp)
-trap 'rm -f "$file"' EXIT
-if [ -n "$MANAGEMENT_KEY" ]; then
-  printf '{\n  "DASHBOARD_PASSWORD": "%s",\n  "MANAGEMENT_KEY": "%s"\n}\n' "$DASHBOARD_PASSWORD" "$MANAGEMENT_KEY" > "$file"
-else
-  printf '{\n  "DASHBOARD_PASSWORD": "%s"\n}\n' "$DASHBOARD_PASSWORD" > "$file"
+if [ -z "$DASHBOARD_PASSWORD" ]; then
+  echo "set-secrets: DASHBOARD_PASSWORD can't be empty" >&2
+  exit 64
 fi
-npx wrangler secret bulk "$file"
+# CPA itself needs a management key of 32+ characters; the password can be anything.
+if [ -n "$MANAGEMENT_KEY" ] && ! printf '%s' "$MANAGEMENT_KEY" | grep -Eq '^[A-Za-z0-9_-]{32,}$'; then
+  echo "set-secrets: MANAGEMENT_KEY needs at least 32 characters of A-Z a-z 0-9 _ -" >&2
+  exit 64
+fi
+
+# Piped through stdin, so any character works and nothing lands in a file or the process list.
+printf '%s' "$DASHBOARD_PASSWORD" | npx wrangler secret put DASHBOARD_PASSWORD
+if [ -n "$MANAGEMENT_KEY" ]; then
+  printf '%s' "$MANAGEMENT_KEY" | npx wrangler secret put MANAGEMENT_KEY
+fi
 
 cat <<OUT
 

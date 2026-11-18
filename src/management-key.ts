@@ -3,7 +3,7 @@
 // key is derived from DASHBOARD_PASSWORD, so a deploy needs one secret. Changing the password then
 // changes the key too, and the container restarts to pick it up (see Cpa.keyRejected).
 const encoder = new TextEncoder();
-const MIN_PASSWORD_LENGTH = 16;
+const MIN_PASSWORD_LENGTH = 1;
 
 export async function managementKeyFor(secret: string | undefined, dashboardPassword: string | undefined): Promise<string> {
   const given = secret?.trim() ?? "";

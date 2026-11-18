@@ -36,7 +36,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "verify": "npm run typecheck && npm run lint && npm test",
-    "deploy": "wrangler deploy"
+    "deploy": "node scripts/check-plan.mjs && wrangler deploy"
   },
   "dependencies": {
     "@cloudflare/containers": "0.3.7",
@@ -54,7 +54,7 @@
   "cloudflare": {
     "bindings": {
       "DASHBOARD_PASSWORD": {
-        "description": "**Required.** Password for the dashboard sign-in at /login. At least 16 characters; a long random string is best, for example `openssl rand -hex 32`."
+        "description": "**Required.** Password for the dashboard sign-in at /login. Any password you like; a long one is harder to guess. **This install needs the [Workers Paid plan](https://developers.cloudflare.com/workers/platform/pricing/) ($5/month to Cloudflare) for Containers.** On Workers Free, use the [Workers-only install (beta)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/worker) instead."
       }
     }
   },

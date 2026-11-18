@@ -378,15 +378,22 @@ describe("handle", () => {
     expect(seen).toEqual(["203.0.113.7", "203.0.113.7"]);
   });
 
-  it("turns sign-in off while the dashboard password is missing or short", async () => {
+  it("accepts any non-empty password the user picks", async () => {
     const { forward } = recorder();
-    const weak = { ...config, dashboardPassword: "short" };
+    const simple = { ...config, dashboardPassword: "123456" };
+    const response = await handle(at("/login", { method: "POST", body: new URLSearchParams({ password: "123456" }) }), simple, forward);
+    expect(response.status).toBe(303);
+  });
+
+  it("turns sign-in off while the dashboard password is missing", async () => {
+    const { forward } = recorder();
+    const weak = { ...config, dashboardPassword: "" };
     const form = await handle(at("/login"), weak, forward);
     expect(await form.text()).toContain("Sign-in is off");
-    const attempt = await handle(at("/login", { method: "POST", body: new URLSearchParams({ password: "short" }) }), weak, forward);
+    const attempt = await handle(at("/login", { method: "POST", body: new URLSearchParams({ password: "" }) }), weak, forward);
     expect(attempt.status).toBe(503);
     expect(attempt.headers.get("set-cookie")).toBeNull();
-    const forgedWithKnownPassword = `${SESSION_COOKIE}=${await issueSession("short", NOW)}`;
+    const forgedWithKnownPassword = `${SESSION_COOKIE}=${await issueSession("", NOW)}`;
     const dashboard = await handle(at("/v8/management/config", { headers: { cookie: forgedWithKnownPassword } }), weak, forward);
     expect(dashboard.status).toBe(401);
   });
