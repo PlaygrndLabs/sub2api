@@ -2,7 +2,7 @@
 # keeping logins, API keys and config. Run it by hand from the Actions tab, one step at a time:
 #   export   copies everything into the sub2api R2 bucket, with a backup; changes nothing else
 #   replace  exports again, then deletes the Workers-only Worker and deploys the Container install;
-#            set DASHBOARD_PASSWORD and MANAGEMENT_KEY on the new Worker right after
+#            set DASHBOARD_PASSWORD on the new Worker right after
 #   check    signs in with the first gateway API key and tries models, GPT text, Claude and Realtime voice
 # Logs show counts, status codes and model names only.
 name: move to container

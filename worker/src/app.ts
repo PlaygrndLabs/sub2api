@@ -20,7 +20,6 @@ import { apiKeyKey, loginKey, requestLine, type Attempt, type UsageRecord } from
 import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "./session.ts";
 
 export const MIN_PASSWORD_LENGTH = 16;
-export const MIN_MANAGEMENT_KEY_LENGTH = MIN_PASSWORD_LENGTH;
 const KEY_CACHE_SECONDS = 60;
 // Short, so a login disabled or removed in the dashboard stops being used within a minute in
 // every isolate, and round-robin across logins still turns.
@@ -71,7 +70,6 @@ export class EdgeCache {
 export interface AppConfig {
   readonly backend: Backend;
   readonly dashboardPassword: string;
-  readonly managementKey: string;
   readonly nowSeconds: () => number;
   readonly upstream: Fetcher;
   readonly panel: (request: Request) => Promise<Response>;
@@ -849,17 +847,8 @@ function withoutCredentials(request: Request, target?: URL): Request {
   return new Request(target ?? request.url, new Request(request, { headers }));
 }
 
-// As on the Container install, MANAGEMENT_KEY must be set and differ from the sign-in password
-// before the management API turns on.
-const MANAGEMENT_KEY_NOT_SET = `The management API is off: set the MANAGEMENT_KEY secret to at least ${MIN_MANAGEMENT_KEY_LENGTH} characters, different from DASHBOARD_PASSWORD.`;
-
-function managementEnabled(config: AppConfig): boolean {
-  return config.managementKey.length >= MIN_MANAGEMENT_KEY_LENGTH && config.managementKey !== config.dashboardPassword;
-}
-
 async function management(request: Request, url: URL, config: AppConfig): Promise<Response> {
   if (!(await signedIn(request, config))) return Response.json({ error: "sign in at /login first" }, { status: 401 });
-  if (!managementEnabled(config)) return Response.json({ error: MANAGEMENT_KEY_NOT_SET }, { status: 503 });
   // The sign-in cookie is the only login; the dashboard's key header is a placeholder.
   if (!hasManagementHeader(request)) return Response.json({ error: "missing management key" }, { status: 401 });
   // The dashboard checks a server with v0's config read before switching to v8.

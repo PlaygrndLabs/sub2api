@@ -79,7 +79,6 @@ async function setup(upstream: (request: Request) => Promise<Response> = async (
   const config: AppConfig = {
     backend,
     dashboardPassword: PASSWORD,
-    managementKey: MANAGEMENT_KEY,
     nowSeconds: () => NOW,
     upstream: async (request) => {
       seen.push(request);
@@ -655,17 +654,12 @@ describe("management API", () => {
     for (const name of ["cookie", "authorization", "x-management-key"]) expect(backend.managed[0]?.headers.get(name)).toBeNull();
   });
 
-  it("is off until its own long enough key is set, never the sign-in password", async () => {
+  it("needs no management key secret: the sign-in is the only login", async () => {
     const { config, backend } = await setup();
-    for (const managementKey of ["", "short", PASSWORD]) {
-      const off = { ...config, managementKey };
-      const response = await handle(await managementCall("/v8/management/config", { authorization: `Bearer ${managementKey}` }), off);
-      expect(response.status).toBe(503);
-      expect(await response.json()).toEqual({ error: expect.stringMatching(/MANAGEMENT_KEY .*different from DASHBOARD_PASSWORD/) });
-    }
-    // Signed-out callers learn nothing about the setup.
-    expect((await handle(at("/v8/management/config"), { ...config, managementKey: "" })).status).toBe(401);
-    expect(backend.managed).toHaveLength(0);
+    const response = await handle(await managementCall("/v8/management/config", { authorization: "Bearer sub2api-session" }), config);
+    expect(response.status).toBe(200);
+    expect(backend.managed).toHaveLength(1);
+    expect((await handle(at("/v8/management/config", { headers: { authorization: "Bearer sub2api-session" } }), config)).status).toBe(401);
   });
 
   it("answers the dashboard's v0 probe with the v8 config", async () => {

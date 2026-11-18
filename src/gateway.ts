@@ -12,9 +12,11 @@ export interface LoginLimiter {
 
 export interface GatewayConfig {
   readonly dashboardPassword: string;
-  // CPA accepts it as MANAGEMENT_PASSWORD (container/entrypoint.sh), even after the dashboard
-  // changes its own key, so the gateway can always send it for a signed-in user.
+  // From src/management-key.ts. CPA accepts it as MANAGEMENT_PASSWORD (container/entrypoint.sh),
+  // even after the dashboard changes its own key, so the gateway can always send it.
   readonly managementKey: string;
+  // Called when CPA rejects that key; true when the container is restarting to pick it up.
+  readonly keyRejected?: () => Promise<boolean>;
   readonly nowSeconds: () => number;
   readonly keyGuard: KeyGuard;
   readonly loginLimiter: LoginLimiter;
@@ -24,6 +26,7 @@ const MAX_LOGIN_BODY = 4096;
 export const MIN_PASSWORD_LENGTH = 16;
 const NO_CLIENT_KEYS = "No API key is set up yet: add one under API Keys in the dashboard.";
 const CPA_UNAVAILABLE = "The gateway is starting or unavailable. Try again shortly.";
+const CPA_RESTARTING = "The gateway is restarting to apply a changed secret. Try again in a minute.";
 const TOO_MANY_ATTEMPTS = "Too many sign-in attempts. Wait a minute and try again.";
 const PASSWORD_NOT_SET = `Sign-in is off: set the DASHBOARD_PASSWORD secret to at least ${MIN_PASSWORD_LENGTH} characters.`;
 
@@ -75,12 +78,18 @@ async function dashboard(request: Request, url: URL, config: GatewayConfig, forw
     return dashboardPage(await forward(plainPageRequest(request)));
   }
   if (!hasManagementHeader(request)) return Response.json({ error: "missing management key" }, { status: 401 });
-  if (config.managementKey === "") return Response.json({ error: "The MANAGEMENT_KEY secret is not set." }, { status: 503 });
+  if (config.managementKey === "") return Response.json({ error: "The management key is not set up." }, { status: 503 });
   const writes = request.method !== "GET" && request.method !== "HEAD";
   if (writes) config.keyGuard.forget();
   const response = await forward(new Request(request, { headers: withManagementKey(request.headers, config.managementKey) }));
   if (writes) config.keyGuard.forget();
-  return response;
+  if (response.status !== 401 || config.keyRejected === undefined) return response;
+  // Only CPA's own key check restarts it, not a 401 some management call passes on from a provider.
+  const text = await response.text();
+  if (/"(invalid|missing) management key"/.test(text) && (await config.keyRejected())) {
+    return Response.json({ error: CPA_RESTARTING }, { status: 503, headers: { "retry-after": "30" } });
+  }
+  return new Response(text, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
 async function signedIn(request: Request, config: GatewayConfig): Promise<boolean> {

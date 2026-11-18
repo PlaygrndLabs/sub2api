@@ -31,13 +31,13 @@ You need a Cloudflare account. Workers Free is enough.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/worker)
 
-Before the first deploy, it asks for `DASHBOARD_PASSWORD` and `MANAGEMENT_KEY`, each at least 16 characters and different from each other, as on the Container install. `openssl rand -hex 24` makes one. Or from a clone:
+Before the first deploy, it asks for one secret, `DASHBOARD_PASSWORD`, at least 16 characters. `openssl rand -hex 24` makes one. Or from a clone:
 
 ```bash
 cd workers && npm ci
 npx wrangler login
 npx wrangler deploy
-sh ../scripts/set-secrets.sh   # generates both secrets, stores them, prints them once
+sh ../scripts/set-secrets.sh   # generates the password, stores it, prints it once
 ```
 
 The Worker is named `sub2api`, like the Container install, so put only one of the two on an account. Installs made before 2026-10-29 were named `sub2api-free`, and updating one creates a new, empty Worker. To keep your logins and keys, set `"name": "sub2api-free"` in `worker/wrangler.jsonc` before you update.
@@ -69,7 +69,7 @@ model_catalog_url = "https://sub2api.<your-subdomain>.workers.dev/v1/models"
 
 Keys and the login made with the first Workers-only release keep working: the old login is turned into an auth file on first use.
 
-The management API sits behind the sign-in cookie. The management key never reaches the browser: the dashboard gets a placeholder and the gateway checks the session instead. The API stays off until `MANAGEMENT_KEY` is set to at least 16 characters and differs from the dashboard password.
+The management API sits behind the sign-in cookie, so this install needs no management key: the dashboard gets a placeholder and the gateway checks the session instead. A `MANAGEMENT_KEY` secret left from an older setup is ignored.
 
 ## Deploying from GitHub
 

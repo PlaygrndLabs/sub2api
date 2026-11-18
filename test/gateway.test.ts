@@ -309,6 +309,28 @@ describe("handle", () => {
     expect(post.status).toBe(404);
   });
 
+  it("restarts CPA once when it rejects the key, as after a changed secret", async () => {
+    const rejected: Forward = async () => Response.json({ error: "invalid management key" }, { status: 401 });
+    let restarts = 0;
+    const restarting = { ...config, keyRejected: async () => restarts++ === 0 };
+    const call = async () => handle(at("/v8/management/config", { headers: { cookie: await sessionCookie(), authorization: "Bearer sub2api-session" } }), restarting, rejected);
+    const first = await call();
+    expect(first.status).toBe(503);
+    expect(first.headers.get("retry-after")).toBe("30");
+    expect((await call()).status).toBe(401);
+    expect(restarts).toBe(2);
+  });
+
+  it("does not restart CPA for a 401 a provider sent back", async () => {
+    const provider: Forward = async () => Response.json({ error: "upstream said unauthorized" }, { status: 401 });
+    let restarts = 0;
+    const watching = { ...config, keyRejected: async () => ++restarts > 0 };
+    const response = await handle(at("/v0/management/api-call", { method: "POST", headers: { cookie: await sessionCookie(), authorization: "Bearer x" }, body: "{}" }), watching, provider);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "upstream said unauthorized" });
+    expect(restarts).toBe(0);
+  });
+
   it("passes a compressed dashboard through unchanged", async () => {
     const gzipped: Forward = async () => new Response("binary", { headers: { "content-type": "text/html", "content-encoding": "gzip" } });
     const response = await handle(at("/management.html", { headers: { cookie: await sessionCookie() } }), config, gzipped);
