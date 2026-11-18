@@ -17,7 +17,7 @@
   "cloudflare": {
     "bindings": {
       "DASHBOARD_PASSWORD": {
-        "description": "**Required.** Password for the dashboard sign-in. At least 16 characters, for example `openssl rand -hex 24`."
+        "description": "**Required.** Password for the dashboard sign-in. Any password you like; a long one is harder to guess."
       }
     }
   },

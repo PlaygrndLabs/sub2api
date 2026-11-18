@@ -19,7 +19,7 @@ import { CooldownBook, retryHint, route as routed, type CooldownEvent } from "./
 import { apiKeyKey, loginKey, requestLine, type Attempt, type UsageRecord } from "./usage.ts";
 import { SESSION_COOKIE, SESSION_SECONDS, issueSession, passwordMatches, readCookie, readSmallForm, sessionIsValid } from "./session.ts";
 
-export const MIN_PASSWORD_LENGTH = 16;
+export const MIN_PASSWORD_LENGTH = 1;
 const KEY_CACHE_SECONDS = 60;
 // Short, so a login disabled or removed in the dashboard stops being used within a minute in
 // every isolate, and round-robin across logins still turns.
@@ -27,7 +27,7 @@ const TOKEN_CACHE_SECONDS = 60;
 const MAX_FORM_BODY = 4096;
 // Workers accept request bodies up to 100 MB; a larger declared body is refused before reading.
 const MAX_BODY = 32 * 1024 * 1024;
-const PASSWORD_NOT_SET = `Sign-in is off: set the DASHBOARD_PASSWORD secret to at least ${MIN_PASSWORD_LENGTH} characters.`;
+const PASSWORD_NOT_SET = "Sign-in is off: set the DASHBOARD_PASSWORD secret.";
 // Usage records wait this long in the isolate, so a burst of requests costs one Durable Object call.
 const USAGE_FLUSH_MS = 5000;
 const USAGE_FLUSH_COUNT = 50;

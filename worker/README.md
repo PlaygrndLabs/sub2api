@@ -31,7 +31,7 @@ You need a Cloudflare account. Workers Free is enough.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/worker)
 
-Before the first deploy, it asks for one required secret, `DASHBOARD_PASSWORD`, at least 16 characters. The field starts empty. `openssl rand -hex 24` makes one. Or from a clone:
+Before the first deploy, it asks for one required secret, `DASHBOARD_PASSWORD`. Pick any password; a long one is harder to guess. The field starts empty. Or from a clone:
 
 ```bash
 cd workers && npm ci

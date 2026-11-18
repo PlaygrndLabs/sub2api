@@ -23,12 +23,12 @@ export interface GatewayConfig {
 }
 
 const MAX_LOGIN_BODY = 4096;
-export const MIN_PASSWORD_LENGTH = 16;
+export const MIN_PASSWORD_LENGTH = 1;
 const NO_CLIENT_KEYS = "No API key is set up yet: add one under API Keys in the dashboard.";
 const CPA_UNAVAILABLE = "The gateway is starting or unavailable. Try again shortly.";
 const CPA_RESTARTING = "The gateway is restarting to apply a changed secret. Try again in a minute.";
 const TOO_MANY_ATTEMPTS = "Too many sign-in attempts. Wait a minute and try again.";
-const PASSWORD_NOT_SET = `Sign-in is off: set the DASHBOARD_PASSWORD secret to at least ${MIN_PASSWORD_LENGTH} characters.`;
+const PASSWORD_NOT_SET = "Sign-in is off: set the DASHBOARD_PASSWORD secret.";
 
 function redirect(location: string, headers: HeadersInit = {}): Response {
   return new Response(null, { status: 303, headers: { location, "cache-control": "no-store", ...headers } });

@@ -14,8 +14,12 @@ describe("managementKeyFor", () => {
     expect(key).not.toContain("correct-horse");
   });
 
-  it("gives no key for a missing or short password", async () => {
+  it("gives no key for a missing password", async () => {
     expect(await managementKeyFor(undefined, undefined)).toBe("");
-    expect(await managementKeyFor(undefined, "short")).toBe("");
+    expect(await managementKeyFor(undefined, "")).toBe("");
+  });
+
+  it("derives a full-length key from any password the user picks", async () => {
+    expect(await managementKeyFor(undefined, "123456")).toMatch(/^[0-9a-f]{64}$/);
   });
 });
