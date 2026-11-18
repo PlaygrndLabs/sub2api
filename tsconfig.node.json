@@ -13,7 +13,9 @@
     "worker/test/codex.test.ts",
     "worker/test/usage.test.ts",
     "worker/test/vertex.test.ts",
-    "worker/test/kimi.test.ts"
+    "worker/test/kimi.test.ts",
+    "scripts/plan-check.ts",
+    "test/plan-check.test.ts"
   ],
   "exclude": []
 }
