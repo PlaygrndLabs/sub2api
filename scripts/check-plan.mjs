@@ -8,13 +8,15 @@ import { existsSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const PAID_PLAN_NEEDED = `
-✘ sub2api: this is the Container install. It needs Cloudflare Containers, and Containers need
-  the Workers Paid plan ($5/month, paid to Cloudflare). This account is on Workers Free.
+✘ sub2api needs the Cloudflare Workers Paid plan. This build deployed nothing.
 
-  Nothing was deployed. Pick one:
-  1. Upgrade to Workers Paid in the Cloudflare dashboard (Workers & Pages, then Plans),
-     then retry this build.
-  2. Use the Workers-only install (beta), which runs on Workers Free:
+  This is the Container install: it runs CPA in a Cloudflare Container, and Containers come
+  only with Workers Paid ($5/month, paid to Cloudflare). This account is on Workers Free.
+
+  To fix it, pick one:
+  1. Upgrade to Workers Paid: https://dash.cloudflare.com/?to=/:account/workers/plans
+     Then deploy again: Workers & Pages, your Worker, Deployments, Retry build.
+  2. Stay on Workers Free with the Workers-only install (beta):
      https://deploy.workers.cloudflare.com/?url=https://github.com/PlaygrndLabs/sub2api/tree/main/worker
 `;
 
