@@ -1,3 +1,3 @@
-# The Deploy to Cloudflare button asks for this secret. The placeholder is too short to work,
-# so the dashboard stays off until you replace it. `openssl rand -hex 32` makes one.
-DASHBOARD_PASSWORD=replace-me
+# The Deploy to Cloudflare button asks for this secret before it deploys. It has no default,
+# so the field starts empty and you must type your own. `openssl rand -hex 32` makes one.
+DASHBOARD_PASSWORD=
