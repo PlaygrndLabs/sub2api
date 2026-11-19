@@ -54,7 +54,7 @@
   "cloudflare": {
     "bindings": {
       "DASHBOARD_PASSWORD": {
-        "description": "**Required.** Password for the dashboard sign-in at /login. Any password you like; a long one is harder to guess."
+        "description": "**Required.** Password for the dashboard sign-in at /login. Any password you like; a long one is harder to guess. This install needs the Workers Paid plan ($5/month to Cloudflare) for Containers. On Workers Free, use the Workers-only install (beta) from the README instead."
       }
     }
   },
