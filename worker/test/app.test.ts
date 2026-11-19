@@ -613,6 +613,7 @@ describe("dashboard", () => {
     const html = await panel.text();
     expect(html).toContain("CPA panel");
     expect(html).toContain('<head><script>(() => {');
+    expect(html).toContain('id = "sub2api-providers-back"');
     expect(html).not.toContain(MANAGEMENT_KEY);
     expect(panel.headers.get("content-length")).toBeNull();
     expect(panel.headers.get("cache-control")).toBe("no-store");

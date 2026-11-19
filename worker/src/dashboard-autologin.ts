@@ -1,3 +1,5 @@
+import { MOBILE_TAG } from "./dashboard-mobile.ts";
+
 // The sign-in gate is the only login. Once signed in, the dashboard sends this placeholder as its
 // management key and the gateway swaps in the real one server-side, so the key never reaches the
 // browser. The placeholder is no secret: only a request with a valid session cookie gets swapped.
@@ -47,9 +49,10 @@ const SCRIPT = `(() => {
   } catch {}
 })();`;
 
-const TAG = `<script>${SCRIPT}</script>`;
+const TAG = `<script>${SCRIPT}</script>${MOBILE_TAG}`;
 
-// Puts the script first in <head>. Without a <head> the page is served unchanged.
+// Puts the sign-in script first in <head>, then the phone layout fix (dashboard-mobile.ts). Without
+// a <head> the page is served unchanged.
 export function withAutoLogin(html: string): string {
   const match = /<head(\s[^>]*)?>/i.exec(html);
   if (match === null) return html;

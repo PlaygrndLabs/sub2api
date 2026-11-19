@@ -298,6 +298,8 @@ describe("handle", () => {
     const html = await response.text();
     expect(html).toMatch(/^<!doctype html><html><head><script>\(\(\) => \{/);
     expect(html).toContain('"sub2api-session"');
+    expect(html).toContain('id = "sub2api-providers-back"');
+    expect(html.match(/<\/script>/g)).toHaveLength(2);
     expect(html).not.toContain(MANAGEMENT_KEY);
     expect(html).not.toContain(PASSWORD);
     expect(response.headers.get("content-length")).toBeNull();
