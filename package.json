@@ -36,7 +36,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "verify": "npm run typecheck && npm run lint && npm test",
-    "deploy": "node scripts/check-plan.mjs && wrangler deploy"
+    "deploy": "node scripts/check-plan.mjs && node scripts/deploy-config.mjs && wrangler deploy --config wrangler.deploy.json"
   },
   "dependencies": {
     "@cloudflare/containers": "0.3.7",

@@ -27,3 +27,4 @@ Everything a deploy holds belongs to its owner: your Cloudflare account, your R2
 - Use long random secrets: `openssl rand -hex 32`.
 - Give each app its own API key, and delete a key the moment it may have leaked.
 - Never commit `.dev.vars`. It is in `.gitignore`.
+- Give each install its own R2 bucket. Installs that share a bucket share logins, API keys and config, so either password opens all of them.
