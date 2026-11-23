@@ -7,6 +7,7 @@
   },
   "include": [
     "test/s3-server.ts",
+    "test/deploy-config.test.ts",
     "worker/test/sqlite.ts",
     "worker/test/account.test.ts",
     "worker/test/management.test.ts",

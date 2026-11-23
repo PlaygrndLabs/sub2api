@@ -29,6 +29,8 @@ On Workers Free? See the [Workers-only install (beta)](#workers-only-install-bet
 2. Fill in the one secret it asks for, `DASHBOARD_PASSWORD`: your dashboard sign-in password. The field starts empty and is required. Pick any password; a long one is harder to guess. CPA's management key is derived from it on the server, so you never set or type one.
 3. Open `https://sub2api.<your-subdomain>.workers.dev`, sign in, and create an API key under **API Keys**.
 
+A second install in the same account needs its own Worker name, such as `sub2api-test`. The container app takes the Worker's name. Create a new R2 bucket for it in the form too: installs that share a bucket share logins, API keys and config, and either password opens all of them.
+
 ## Connect a subscription
 
 1. In the dashboard, open **OAuth login** and pick a provider (for Claude: Anthropic).
@@ -91,7 +93,7 @@ If git refuses because the histories are unrelated, add `--allow-unrelated-histo
 npm ci
 npx wrangler login
 npx wrangler r2 bucket create sub2api
-npx wrangler deploy        # needs Docker to build the image
+npm run deploy             # needs Docker to build the image
 sh scripts/set-secrets.sh  # generates the password, stores it, prints it once
 ```
 
